@@ -47,7 +47,9 @@ from store.evidence import (
     get_session,
     init_db,
     log_event,
+    update_remediation,
 )
+from mutate.mutate import open_remediation_pr
 
 # ── Logging ────────────────────────────────────────────────────────────────
 
@@ -70,6 +72,9 @@ DATABASE_URL: str = os.environ.get(
     "postgresql+asyncpg://soc2:soc2secret@localhost:5432/compliance",
 )
 GITHUB_WEBHOOK_SECRET: str = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
+GITHUB_TOKEN: str          = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_REPO_OWNER: str     = os.environ.get("GITHUB_REPO_OWNER", "")
+GITHUB_REPO_NAME: str      = os.environ.get("GITHUB_REPO_NAME", "")
 
 
 # ── Lifespan ───────────────────────────────────────────────────────────────
@@ -231,6 +236,18 @@ class ScanRequest(BaseModel):
         default=None,
         description="Optional git commit SHA for audit attribution.",
     )
+    repo_file_path: str | None = Field(
+        default=None,
+        description=(
+            "Path of the file inside the GitHub repo (e.g. 'infra/main.tf'). "
+            "When provided, a remediation PR is opened for every violation found."
+        ),
+        examples=["infra/main.tf"],
+    )
+    open_prs: bool = Field(
+        default=False,
+        description="Set to true to automatically open remediation PRs for every violation.",
+    )
 
 
 class FindingResponse(BaseModel):
@@ -241,6 +258,7 @@ class FindingResponse(BaseModel):
     file_path: str
     severity: str
     git_sha: str | None
+    pr_url: str | None = None
 
 
 @app.post(
@@ -269,25 +287,70 @@ async def scan_checkov(req: ScanRequest) -> list[FindingResponse]:
     log.info("Running Checkov scan", file=str(path))
     findings = await run_checkov(path, git_sha=req.git_sha)
 
-    # Persist every finding to the evidence store
+    repo_full_name = f"{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}"
+    should_open_prs = (
+        req.open_prs
+        and req.repo_file_path
+        and GITHUB_TOKEN
+        and GITHUB_REPO_OWNER
+        and GITHUB_REPO_NAME
+    )
+
+    responses: list[FindingResponse] = []
+
     async with get_session() as session:
         for finding in findings:
-            await log_event(session, finding.to_evidence_dict())
+            event = await log_event(session, finding.to_evidence_dict())
+
+            pr_url    = None
+            pr_number = None
+
+            if should_open_prs:
+                try:
+                    result = await open_remediation_pr(
+                        github_token=GITHUB_TOKEN,
+                        repo_full_name=repo_full_name,
+                        file_path=req.repo_file_path,
+                        check_id=finding.check_id,
+                        control_id=finding.control_id,
+                        control_name=finding.control_name,
+                        resource_name=finding.resource_name,
+                        severity=finding.severity,
+                    )
+                    pr_url    = result.pr_url
+                    pr_number = result.pr_number
+                    await update_remediation(
+                        session,
+                        event.id,
+                        pr_url=pr_url,
+                        pr_number=pr_number,
+                    )
+                    log.info(
+                        "Remediation PR opened",
+                        check_id=finding.check_id,
+                        pr=pr_url,
+                    )
+                except Exception as exc:
+                    log.error(
+                        "Failed to open PR for %s: %s",
+                        finding.check_id, exc,
+                    )
+
+            responses.append(
+                FindingResponse(
+                    check_id=finding.check_id,
+                    control_id=finding.control_id,
+                    control_name=finding.control_name,
+                    resource_name=finding.resource_name,
+                    file_path=finding.file_path,
+                    severity=finding.severity,
+                    git_sha=finding.git_sha,
+                    pr_url=pr_url,
+                )
+            )
 
     log.info("Checkov scan complete", violations=len(findings))
-
-    return [
-        FindingResponse(
-            check_id=f.check_id,
-            control_id=f.control_id,
-            control_name=f.control_name,
-            resource_name=f.resource_name,
-            file_path=f.file_path,
-            severity=f.severity,
-            git_sha=f.git_sha,
-        )
-        for f in findings
-    ]
+    return responses
 
 
 # ── Evidence read API ──────────────────────────────────────────────────────
