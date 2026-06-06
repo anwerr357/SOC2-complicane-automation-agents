@@ -25,9 +25,9 @@ writes) is awaited and never executed on the event-loop thread directly.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
-import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -50,6 +50,13 @@ from store.evidence import (
     update_remediation,
 )
 from mutate.mutate import open_remediation_pr
+from brain.embeddings import embed_controls
+from brain.rag import retrieve_by_control_id
+from brain.llm import generate_explanation
+from store.redis_streams import init_redis, close_redis, publish
+from agents.policy_agent import PolicyAgent
+from agents.cluster_operator import ClusterOperatorAgent
+from agents.dev_team_agent import DevTeamAgent
 
 # ── Logging ────────────────────────────────────────────────────────────────
 
@@ -75,18 +82,41 @@ GITHUB_WEBHOOK_SECRET: str = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
 GITHUB_TOKEN: str          = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPO_OWNER: str     = os.environ.get("GITHUB_REPO_OWNER", "")
 GITHUB_REPO_NAME: str      = os.environ.get("GITHUB_REPO_NAME", "")
+QDRANT_URL: str            = os.environ.get("QDRANT_URL",  "http://localhost:6333")
+REDIS_URL: str             = os.environ.get("REDIS_URL",   "redis://localhost:6379")
 
 
 # ── Lifespan ───────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialise infrastructure connections on startup, clean up on shutdown."""
+    """Initialise all infrastructure and start agents on startup."""
     log.info("Starting SOC 2 Compliance Agent API…")
+
+    # ── Infrastructure ─────────────────────────────────────────────────────
     await init_db(DATABASE_URL)
-    log.info("Database ready.")
-    yield
-    log.info("Shutting down — closing database pool…")
+    log.info("Postgres ready.")
+
+    await init_redis(REDIS_URL)
+    log.info("Redis ready.")
+
+    await embed_controls(QDRANT_URL)
+    log.info("SOC 2 controls embedded into Qdrant.")
+
+    # ── Start agents as background tasks ───────────────────────────────────
+    policy_task   = asyncio.create_task(PolicyAgent().run(),         name="policy-agent")
+    cluster_task  = asyncio.create_task(ClusterOperatorAgent().run(), name="cluster-agent")
+    dev_team_task = asyncio.create_task(DevTeamAgent().run(),         name="devteam-agent")
+    log.info("All agents started.")
+
+    yield   # ← app serves requests here
+
+    # ── Shutdown ───────────────────────────────────────────────────────────
+    log.info("Shutting down — stopping agents…")
+    policy_task.cancel()
+    cluster_task.cancel()
+    dev_team_task.cancel()
+    await close_redis()
     await close_db()
 
 
@@ -192,14 +222,21 @@ async def github_webhook(
         repo=payload.get("repository", {}).get("full_name"),
     )
 
-    # TODO (Week 2): publish to Redis Stream `github.prs` and hand off to
-    # the Dev Team Agent.  For now we acknowledge and return.
+    # Publish to Redis Stream — Dev Team Agent picks it up automatically
+    await publish("github.prs", {
+        "source":     "github",
+        "event_type": event_type,
+        "repo":       payload.get("repository", {}).get("full_name", ""),
+        "sha":        payload.get("after", ""),
+        "payload":    payload,
+    })
+
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
         content={
-            "received": True,
+            "received":   True,
             "event_type": event_type,
-            "message": "Event queued for processing.",
+            "message":    "Event published to github.prs stream.",
         },
     )
 
@@ -300,8 +337,33 @@ async def scan_checkov(req: ScanRequest) -> list[FindingResponse]:
 
     async with get_session() as session:
         for finding in findings:
-            event = await log_event(session, finding.to_evidence_dict())
 
+            # ── Step A: RAG — fetch SOC 2 control text from Qdrant ────────
+            control = await retrieve_by_control_id(
+                finding.control_id, QDRANT_URL
+            )
+
+            # ── Step B: LLM — generate plain-English explanation ──────────
+            explanation = await generate_explanation(
+                check_id=finding.check_id,
+                control_id=finding.control_id,
+                control_name=finding.control_name,
+                control_text=control.text,
+                resource_name=finding.resource_name,
+                file_path=finding.file_path,
+                severity=finding.severity,
+            )
+
+            # ── Step C: persist to evidence store ─────────────────────────
+            evidence_dict = finding.to_evidence_dict()
+            evidence_dict["violation_description"] = (
+                f"{explanation.violation_summary}\n\n"
+                f"{explanation.business_impact}\n\n"
+                f"Remediation: {explanation.remediation_steps}"
+            )
+            event = await log_event(session, evidence_dict)
+
+            # ── Step D: open remediation PR if requested ───────────────────
             pr_url    = None
             pr_number = None
 
@@ -316,6 +378,8 @@ async def scan_checkov(req: ScanRequest) -> list[FindingResponse]:
                         control_name=finding.control_name,
                         resource_name=finding.resource_name,
                         severity=finding.severity,
+                        violation_description=explanation.violation_summary,
+                        control_text=control.text,
                     )
                     pr_url    = result.pr_url
                     pr_number = result.pr_number
@@ -351,6 +415,45 @@ async def scan_checkov(req: ScanRequest) -> list[FindingResponse]:
 
     log.info("Checkov scan complete", violations=len(findings))
     return responses
+
+
+# ── Mock event triggers (development only) ────────────────────────────────
+
+@app.post("/dev/mock-k8s-events", tags=["dev"])
+async def trigger_mock_k8s_events(count: int = 3) -> dict:
+    """
+    Publish mock Kubernetes drift events to the k8s.events Redis Stream.
+
+    The Policy Agent and Cluster Operator Agent will pick them up
+    immediately and run the remediation loop.
+
+    Only for development — remove or restrict in production.
+    """
+    from scanners.k8s_watcher import publish_mock_events
+    msg_ids = await publish_mock_events(count=count, delay_seconds=0)
+    return {
+        "published": len(msg_ids),
+        "stream":    "k8s.events",
+        "msg_ids":   msg_ids,
+    }
+
+
+@app.post("/dev/mock-tf-plan", tags=["dev"])
+async def trigger_mock_tf_plan(
+    file_path: str = "tests/fixtures/demo.tf",
+    repo_file_path: str = "infra/main.tf",
+) -> dict:
+    """
+    Publish a Terraform plan event to the tf.plans Redis Stream.
+    The Policy Agent will pick it up and run Checkov.
+    """
+    msg_id = await publish("tf.plans", {
+        "source":         "manual",
+        "file_path":      file_path,
+        "repo_file_path": repo_file_path,
+        "git_sha":        "",
+    })
+    return {"published": 1, "stream": "tf.plans", "msg_id": msg_id}
 
 
 # ── Evidence read API ──────────────────────────────────────────────────────

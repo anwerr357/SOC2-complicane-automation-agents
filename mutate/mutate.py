@@ -3,21 +3,23 @@ mutate/mutate.py
 ────────────────
 Remediation mutator — step 4 of the 5-step compliance loop.
 
-Week 2 scope
-────────────
-Rule-based patching: for each known Checkov check ID we have a deterministic
-fix function that returns the corrected Terraform block.  The LLM-based
-patcher (Claude API) replaces this in Week 3 — the interface stays identical.
+Week 3 upgrade
+──────────────
+Step 2 now tries LLM-based patching first (brain/llm.generate_patch).
+If the LLM call fails or no API key is configured, falls back to the
+rule-based PATCH_REGISTRY functions from Week 2.  Interface is unchanged.
 
 What open_remediation_pr() does
 ────────────────────────────────
 1. Fetch the violating file content from GitHub (current HEAD)
-2. Apply the rule-based patch for the specific check_id
+2. Patch the file:
+     a. Try LLM  → generate_patch(file, finding, control_text)
+     b. Fallback → PATCH_REGISTRY[check_id](content, resource_name)
 3. Create branch:  compliance-fix/<control_id>/<check_id>
 4. Push the patched file as a single commit
 5. Open a PR:
      title:  [CC6.7] Fix: S3 encryption missing on aws_s3_bucket.app_data
-     body:   violation summary + what was changed + SOC 2 control reference
+     body:   LLM-generated explanation + changes summary + SOC 2 reference
      label:  compliance-fix  (created if it doesn't exist)
 6. Return the PR URL so the caller can store it in the evidence table
 
@@ -36,6 +38,8 @@ from datetime import datetime, timezone
 
 from github import Auth, Github, GithubException
 from github.Repository import Repository
+
+from brain.llm import generate_patch
 
 log = logging.getLogger(__name__)
 
@@ -168,6 +172,33 @@ PATCH_REGISTRY: dict[str, callable] = {
 }
 
 
+# ── Rule-based patch helper ────────────────────────────────────────────────
+
+def _apply_rule_patch(
+    content: str,
+    check_id: str,
+    resource_name: str,
+) -> tuple[str, bool, str]:
+    """
+    Apply a hardcoded patch from PATCH_REGISTRY.
+
+    Returns (patched_content, patched_flag, changes_summary).
+    Used as fallback when the LLM patch is unavailable or fails.
+    """
+    patch_fn = PATCH_REGISTRY.get(check_id)
+    if patch_fn is None:
+        log.warning(
+            "No rule-based patch for %s — PR will document the issue only.",
+            check_id,
+        )
+        return content, False, "No automated fix available — manual remediation required."
+
+    patched = patch_fn(content, resource_name)
+    summary = f"Applied rule-based fix for {check_id} on {resource_name}."
+    log.info("Rule-based patch applied for %s", check_id)
+    return patched, True, summary
+
+
 # ── Result dataclass ───────────────────────────────────────────────────────
 
 @dataclass
@@ -192,6 +223,7 @@ async def open_remediation_pr(
     resource_name: str,           # e.g. "aws_s3_bucket.app_data"
     severity: str,                # e.g. "MEDIUM"
     violation_description: str = "",
+    control_text: str = "",       # SOC 2 control text from Qdrant — used by LLM patcher
 ) -> RemediationResult:
     """
     Open a GitHub pull request that fixes a single Checkov violation.
@@ -232,18 +264,37 @@ async def open_remediation_pr(
         ) from exc
 
     # ── 2. Apply patch ─────────────────────────────────────────────────────
-    patch_fn = PATCH_REGISTRY.get(check_id)
-    if patch_fn is None:
-        log.warning(
-            "No patch function for check_id=%s — PR will document the issue only.",
-            check_id,
+    # Try LLM first (Week 3). Fall back to PATCH_REGISTRY (Week 2) if:
+    #   - no control_text was passed (RAG not available)
+    #   - LLM call failed (bad key, timeout, etc.)
+    #   - LLM returned the file unchanged (used_llm=False)
+
+    changes_summary = ""
+
+    if control_text:
+        llm_result = await generate_patch(
+            file_content=original,
+            check_id=check_id,
+            control_id=control_id,
+            control_name=control_name,
+            control_text=control_text,
+            resource_name=resource_name,
+            file_path=file_path,
         )
-        patched_content = original
-        patched = False
+        if llm_result.used_llm:
+            patched_content = llm_result.patched_content
+            changes_summary = llm_result.changes_summary
+            patched = True
+            log.info("LLM patch applied for %s — %s", check_id, changes_summary)
+        else:
+            log.warning("LLM patch failed for %s — falling back to rule-based.", check_id)
+            patched_content, patched, changes_summary = _apply_rule_patch(
+                original, check_id, resource_name
+            )
     else:
-        patched_content = patch_fn(original, resource_name)
-        patched = True
-        log.info("Applied rule-based patch for %s", check_id)
+        patched_content, patched, changes_summary = _apply_rule_patch(
+            original, check_id, resource_name
+        )
 
     # ── 3. Create branch ───────────────────────────────────────────────────
     # Branch name: compliance-fix/CC6.7/CKV2_AWS_61
@@ -298,6 +349,7 @@ async def open_remediation_pr(
         severity=severity,
         violation_description=violation_description,
         patched=patched,
+        changes_summary=changes_summary,
     )
 
     pr = repo.create_pull(
@@ -375,20 +427,26 @@ def _build_pr_body(
     severity: str,
     violation_description: str,
     patched: bool,
+    changes_summary: str = "",
 ) -> str:
     """Build the pull request body markdown."""
     patch_note = (
-        "This PR applies an automated rule-based fix.  "
-        "Please review the change before merging."
+        "This PR applies an automated fix. Please review before merging."
         if patched
         else
-        "No automatic patch is available for this check yet.  "
+        "No automatic patch is available for this check yet. "
         "This PR documents the violation and requires a manual fix."
     )
 
     description_section = (
-        f"\n**Violation detail:**\n{violation_description}\n"
+        f"\n### Violation explanation\n\n{violation_description}\n"
         if violation_description
+        else ""
+    )
+
+    changes_section = (
+        f"\n### What was changed\n\n{changes_summary}\n"
+        if changes_summary
         else ""
     )
 
@@ -403,7 +461,7 @@ def _build_pr_body(
 | **File** | `{file_path}` |
 | **Detected by** | SOC 2 Compliance Agent (Policy Agent / Checkov) |
 | **Timestamp** | {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")} |
-{description_section}
+{description_section}{changes_section}
 ---
 
 ### What was wrong
@@ -426,5 +484,4 @@ which maps to SOC 2 Trust Service Criterion **{control_id} ({control_name})**.
 
 ---
 > *Opened automatically by the [SOC 2 Compliance Agent](https://github.com/anwerr357/travel-App).*
-> *Week 3 upgrade: this PR body will include an LLM-generated plain-English explanation grounded in the exact SOC 2 control text.*
 """
