@@ -22,7 +22,7 @@ anthropic==0.27.0
 langgraph==0.1.2
 
 # ── Scanners ──────────────────────────────────────────────────────────────
-checkov==3.2.91          # installed separately in Dockerfile too; pinned here for local dev
+checkov>=3.2.529          # installed separately in Dockerfile too; pinned here for local dev
 # trufflehog and semgrep are called as external binaries via subprocess
 
 # ── GitHub integration ────────────────────────────────────────────────────
