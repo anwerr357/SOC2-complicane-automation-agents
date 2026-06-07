@@ -4,12 +4,71 @@ mutate/validate.py
 Post-remediation validator — the "V" in the 5-step loop.
 
 After a PR is opened, re-run the relevant scanner on the patched file:
-  - If the check now passes → log as REMEDIATED in the evidence store
-  - If the check still fails → escalate to Slack, flag for human review
+  - If the original check no longer fires → the loop logs REMEDIATED
+  - If the check still fails → the loop escalates for human review
 
-Implemented in Week 5 as part of the full remediation loop.
+Dispatches on finding["scanner_used"]:
+  - checkov / semgrep : write patched_content to a temp file and re-scan it,
+    returning True when the original check_id is gone from the results.
+  - trufflehog        : a single-file re-scan can't redo git-history analysis,
+    so we confirm the raw secret string is absent from patched_content. This
+    is the practical "is the secret gone?" test.
 """
-
 from __future__ import annotations
 
-# TODO (Week 5): implement validate_remediation(finding, patched_content) -> bool
+import logging
+import tempfile
+from pathlib import Path
+
+log = logging.getLogger(__name__)
+
+# Fallback extension per scanner when the finding's file_path has none.
+_DEFAULT_EXT = {"checkov": ".tf", "semgrep": ".py"}
+
+
+def _ext_for(finding: dict, scanner: str) -> str:
+    suffix = Path(finding.get("file_path", "")).suffix
+    return suffix or _DEFAULT_EXT.get(scanner, ".txt")
+
+
+async def validate_remediation(finding: dict, patched_content: str) -> bool:
+    """
+    Re-verify that the violation described by `finding` is gone from
+    `patched_content`. Dispatches on finding["scanner_used"].
+
+    Returns True if the original check no longer fires, else False.
+    Never raises — any failure is treated as "not validated" (False) so the
+    caller escalates rather than falsely claiming success.
+    """
+    scanner = (finding.get("scanner_used") or "").lower()
+    check_id = finding.get("check_id", "")
+
+    try:
+        if scanner == "trufflehog":
+            # A single-file re-scan can't redo history analysis, so confirm the
+            # raw secret string is absent from the patched content.
+            secret = (finding.get("raw_finding") or {}).get("Raw", "")
+            if not secret:
+                log.warning("Trufflehog finding has no Raw secret; cannot validate.")
+                return False
+            return secret not in patched_content
+
+        if scanner in ("checkov", "semgrep"):
+            with tempfile.TemporaryDirectory() as d:
+                fpath = Path(d) / f"patched{_ext_for(finding, scanner)}"
+                fpath.write_text(patched_content)
+                if scanner == "checkov":
+                    from scanners.checkov_runner import run_checkov
+                    results = await run_checkov(fpath)
+                else:
+                    from scanners.semgrep_runner import run_semgrep
+                    results = await run_semgrep(fpath)
+                still_failing = {r.check_id for r in results}
+                return check_id not in still_failing
+
+        log.warning("validate_remediation: unknown scanner '%s'", scanner)
+        return False
+
+    except Exception as exc:
+        log.error("validate_remediation failed for %s: %s", check_id, exc)
+        return False

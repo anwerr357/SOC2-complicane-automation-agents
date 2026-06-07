@@ -208,6 +208,7 @@ class RemediationResult:
     pr_number: int
     branch:    str
     patched:   bool   # False if no patch function exists for this check_id
+    patched_content: str = ""   # full patched file content, for the validate step
 
 
 # ── Main function ──────────────────────────────────────────────────────────
@@ -375,6 +376,7 @@ async def open_remediation_pr(
         pr_number=pr.number,
         branch=branch_name,
         patched=patched,
+        patched_content=patched_content,
     )
 
 

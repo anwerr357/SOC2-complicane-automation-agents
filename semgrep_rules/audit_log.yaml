@@ -1,0 +1,39 @@
+# semgrep_rules/audit_log.yaml
+rules:
+  - id: db-write-without-audit-log
+    languages: [python]
+    severity: WARNING
+    message: >-
+      This function performs a database write but never calls audit_log().
+      SOC 2 CC7.2 requires audit logging of data-modifying operations.
+    metadata:
+      soc2_control: CC7.2
+      soc2_control_name: Audit logging and monitoring
+      severity: HIGH
+    patterns:
+      - pattern-either:
+          - pattern: |
+              def $FUNC(...):
+                  ...
+                  $OBJ.execute(...)
+                  ...
+          - pattern: |
+              def $FUNC(...):
+                  ...
+                  $OBJ.save(...)
+                  ...
+          - pattern: |
+              def $FUNC(...):
+                  ...
+                  $OBJ.insert(...)
+                  ...
+          - pattern: |
+              def $FUNC(...):
+                  ...
+                  $OBJ.commit(...)
+                  ...
+      - pattern-not: |
+          def $FUNC(...):
+              ...
+              audit_log(...)
+              ...

@@ -1,0 +1,19 @@
+# semgrep_rules/dangerous_eval.yaml
+rules:
+  - id: dangerous-dynamic-execution
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Executing dynamic input via eval/exec/pickle.loads enables code
+      injection. SOC 2 CC6.1 (logical access controls).
+    metadata:
+      soc2_control: CC6.1
+      soc2_control_name: Logical and physical access controls
+      severity: MEDIUM
+    patterns:
+      - pattern-either:
+          - pattern: eval($X)
+          - pattern: exec($X)
+          - pattern: pickle.loads($X)
+      - pattern-not: eval("...")
+      - pattern-not: exec("...")
