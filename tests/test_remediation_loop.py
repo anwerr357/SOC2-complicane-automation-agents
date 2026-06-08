@@ -39,6 +39,7 @@ def _base_finding():
         "control_name": "Logical and physical access controls",
         "resource_name": "AWS",
         "file_path": "config.py",
+        "repo_file_path": "config.py",
         "severity": "HIGH",
         "raw_finding": {"Raw": "AKIA..."},
     }
@@ -52,10 +53,13 @@ def patched_io(monkeypatch):
         calls["logged"] = finding
         return _FakeEvent()
 
-    async def fake_update_remediation(session, event_id, *, pr_url, pr_number, status=None):
+    async def fake_update_remediation(
+        session, event_id, *, pr_url, pr_number, status=None,
+        violation_description=None,
+    ):
         calls["remediated"] = (event_id, pr_url, pr_number)
 
-    async def fake_escalate(session, event_id):
+    async def fake_escalate(session, event_id, *, violation_description=None):
         calls["escalated"] = event_id
 
     class _FakeSession:
@@ -126,6 +130,35 @@ async def test_logs_violation_first(patched_io, monkeypatch):
         _base_finding(), repo_full_name="x/y", github_token="t"
     )
     assert patched_io["logged"]["check_id"] == "TRUFFLEHOG_AWS"
+
+
+@pytest.mark.asyncio
+async def test_non_remediable_finding_escalates(patched_io, monkeypatch):
+    """A finding with no patchable file / unsupported scanner is escalated
+    without attempting a PR."""
+    pr_called = {"opened": False}
+
+    async def fake_open_pr(**kw):
+        pr_called["opened"] = True
+        return _FakePR()
+    monkeypatch.setattr(rem, "open_remediation_pr", fake_open_pr)
+
+    async def fake_validate(finding, patched_content):
+        return True
+    monkeypatch.setattr(rem, "validate_remediation", fake_validate)
+
+    finding = _base_finding()
+    finding["scanner_used"] = "k8s_watch"   # not a validate-supported scanner
+    finding.pop("repo_file_path", None)
+    finding["file_path"] = "k8s/default/web"
+
+    outcome = await rem.run_remediation_loop(
+        finding, repo_full_name="", github_token=""
+    )
+    assert outcome.status == "ESCALATED"
+    assert patched_io["escalated"] == "evt-123"
+    assert patched_io["remediated"] is None
+    assert pr_called["opened"] is False, "must not open a PR for non-remediable findings"
 
 
 @pytest.mark.asyncio

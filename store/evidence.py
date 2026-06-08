@@ -152,29 +152,39 @@ async def update_remediation(
     pr_url: str,
     pr_number: int,
     status: EventStatus = EventStatus.REMEDIATED,
+    violation_description: str | None = None,
 ) -> None:
     """
     Attach a pull-request URL to an existing event and flip its status.
-    Called by the mutate layer after a PR is opened.
+    Called by the mutate layer after a PR is opened. When
+    violation_description is given, the stored description is updated too.
     """
+    values = {"pr_url": pr_url, "pr_number": pr_number, "status": status}
+    if violation_description is not None:
+        values["violation_description"] = violation_description
     await session.execute(
         update(EvidenceEvent)
         .where(EvidenceEvent.id == event_id)
-        .values(
-            pr_url=pr_url,
-            pr_number=pr_number,
-            status=status,
-        )
+        .values(**values)
     )
     log.info("Updated remediation for event %s → PR #%d", event_id, pr_number)
 
 
-async def escalate_event(session: AsyncSession, event_id: UUID) -> None:
-    """Mark an event as escalated (max retries exceeded or validation failed)."""
+async def escalate_event(
+    session: AsyncSession,
+    event_id: UUID,
+    *,
+    violation_description: str | None = None,
+) -> None:
+    """Mark an event as escalated (max retries exceeded or validation failed).
+    When violation_description is given, the stored description is updated too."""
+    values = {"status": EventStatus.ESCALATED}
+    if violation_description is not None:
+        values["violation_description"] = violation_description
     await session.execute(
         update(EvidenceEvent)
         .where(EvidenceEvent.id == event_id)
-        .values(status=EventStatus.ESCALATED)
+        .values(**values)
     )
     log.warning("Escalated event %s — human review required.", event_id)
 

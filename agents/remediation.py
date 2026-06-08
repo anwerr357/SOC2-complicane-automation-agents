@@ -34,6 +34,11 @@ log = logging.getLogger(__name__)
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
 
+# Scanners whose findings can be re-scanned by validate_remediation; only these
+# are eligible for auto-remediation (MUTATE + VALIDATE). K8s drift findings
+# (scanner_used="k8s_watch") fall outside this set and are escalated instead.
+_VALIDATE_SUPPORTED = {"checkov", "semgrep", "trufflehog"}
+
 
 @dataclass
 class LoopOutcome:
@@ -71,12 +76,38 @@ async def run_remediation_loop(
             file_path=finding.get("file_path", "unknown"),
             severity=finding.get("severity", "MEDIUM"),
         )
+        enriched = (
+            f"{explanation.violation_summary}\n\n"
+            f"{explanation.business_impact}\n\n"
+            f"Remediation: {explanation.remediation_steps}"
+        )
+
+        # Decide whether this finding can be auto-fixed by a PR -------------
+        patch_path = finding.get("repo_file_path") or finding.get("file_path")
+        remediable = bool(
+            repo_full_name
+            and github_token
+            and patch_path
+            and finding.get("scanner_used") in _VALIDATE_SUPPORTED
+        )
+
+        if not remediable:
+            async with get_session() as session:
+                await escalate_event(
+                    session, event_id, violation_description=enriched
+                )
+                await session.commit()
+            log.warning("[loop] %s not auto-remediable → escalated", check_id)
+            return LoopOutcome(
+                status="ESCALATED",
+                detail="not auto-remediable — human review",
+            )
 
         # 4 MUTATE ----------------------------------------------------------
         pr = await open_remediation_pr(
             github_token=github_token,
             repo_full_name=repo_full_name,
-            file_path=finding.get("file_path", ""),
+            file_path=patch_path,
             check_id=check_id,
             control_id=control_id,
             control_name=finding.get("control_name", control.control_name),
@@ -91,13 +122,16 @@ async def run_remediation_loop(
         async with get_session() as session:
             if ok:
                 await update_remediation(
-                    session, event_id, pr_url=pr.pr_url, pr_number=pr.pr_number
+                    session, event_id, pr_url=pr.pr_url, pr_number=pr.pr_number,
+                    violation_description=enriched,
                 )
                 await session.commit()
                 log.info("[loop] %s REMEDIATED → %s", check_id, pr.pr_url)
                 return LoopOutcome(status="REMEDIATED", pr_url=pr.pr_url)
             else:
-                await escalate_event(session, event_id)
+                await escalate_event(
+                    session, event_id, violation_description=enriched
+                )
                 await session.commit()
                 log.warning("[loop] %s validation FAILED → escalated", check_id)
                 return LoopOutcome(
