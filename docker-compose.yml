@@ -18,7 +18,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── Redis — event bus (Streams) ────────────────────────────────────────────
+  # ── Redis — event bus (Streams) ───────────────────────────────────────────
   redis:
     image: redis:7-alpine
     container_name: soc2_redis
@@ -45,7 +45,7 @@ services:
     volumes:
       - qdrant_data:/qdrant/storage
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:6333/healthz || exit 1"]
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5

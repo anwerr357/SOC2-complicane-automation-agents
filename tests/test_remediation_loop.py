@@ -47,7 +47,10 @@ def _base_finding():
 
 @pytest.fixture
 def patched_io(monkeypatch):
-    calls = {"logged": None, "remediated": None, "escalated": None}
+    calls = {
+        "logged": None, "remediated": None,
+        "escalated": None, "notified": None,
+    }
 
     async def fake_log_event(session, finding):
         calls["logged"] = finding
@@ -89,6 +92,12 @@ def patched_io(monkeypatch):
     monkeypatch.setattr(rem, "retrieve_by_control_id", fake_retrieve)
     monkeypatch.setattr(rem, "generate_explanation", fake_explain)
     monkeypatch.setattr(rem, "open_remediation_pr", fake_open_pr)
+
+    async def fake_post_escalation(**kw):
+        calls["notified"] = kw
+        return True
+
+    monkeypatch.setattr(rem, "post_escalation", fake_post_escalation)
     return calls
 
 
@@ -104,6 +113,7 @@ async def test_validation_pass_marks_remediated(patched_io, monkeypatch):
     assert outcome.status == "REMEDIATED"
     assert patched_io["remediated"] == ("evt-123", _FakePR.pr_url, 1)
     assert patched_io["escalated"] is None
+    assert patched_io["notified"] is None  # no Slack on REMEDIATED
 
 
 @pytest.mark.asyncio
@@ -118,6 +128,8 @@ async def test_validation_fail_escalates(patched_io, monkeypatch):
     assert outcome.status == "ESCALATED"
     assert patched_io["escalated"] == "evt-123"
     assert patched_io["remediated"] is None
+    assert patched_io["notified"] is not None
+    assert patched_io["notified"]["detail"] == "post-patch scan still failing"
 
 
 @pytest.mark.asyncio
@@ -159,6 +171,9 @@ async def test_non_remediable_finding_escalates(patched_io, monkeypatch):
     assert patched_io["escalated"] == "evt-123"
     assert patched_io["remediated"] is None
     assert pr_called["opened"] is False, "must not open a PR for non-remediable findings"
+    assert patched_io["notified"] is not None
+    assert patched_io["notified"]["detail"] == "not auto-remediable — human review"
+    assert patched_io["notified"]["control_id"] == "CC6.1"
 
 
 @pytest.mark.asyncio

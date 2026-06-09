@@ -23,6 +23,7 @@ from brain.llm import generate_explanation
 from brain.rag import retrieve_by_control_id
 from mutate.mutate import open_remediation_pr
 from mutate.validate import validate_remediation
+from notify.slack import post_escalation
 from store.evidence import (
     escalate_event,
     get_session,
@@ -97,6 +98,17 @@ async def run_remediation_loop(
                     session, event_id, violation_description=enriched
                 )
                 await session.commit()
+            await post_escalation(
+                check_id=check_id,
+                control_id=control_id,
+                control_name=finding.get("control_name", control.control_name),
+                severity=finding.get("severity", "MEDIUM"),
+                resource_name=finding.get("resource_name", "unknown"),
+                agent_name=finding.get("agent_name", "unknown"),
+                explanation=enriched,
+                event_id=str(event_id),
+                detail="not auto-remediable — human review",
+            )
             log.warning("[loop] %s not auto-remediable → escalated", check_id)
             return LoopOutcome(
                 status="ESCALATED",
@@ -133,6 +145,17 @@ async def run_remediation_loop(
                     session, event_id, violation_description=enriched
                 )
                 await session.commit()
+                await post_escalation(
+                    check_id=check_id,
+                    control_id=control_id,
+                    control_name=finding.get("control_name", control.control_name),
+                    severity=finding.get("severity", "MEDIUM"),
+                    resource_name=finding.get("resource_name", "unknown"),
+                    agent_name=finding.get("agent_name", "unknown"),
+                    explanation=enriched,
+                    event_id=str(event_id),
+                    detail="post-patch scan still failing",
+                )
                 log.warning("[loop] %s validation FAILED → escalated", check_id)
                 return LoopOutcome(
                     status="ESCALATED", pr_url=pr.pr_url,

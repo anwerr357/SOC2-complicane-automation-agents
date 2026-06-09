@@ -246,18 +246,40 @@ async def github_webhook(
 @app.post("/webhook/prometheus", tags=["webhooks"])
 async def prometheus_webhook(request: Request) -> JSONResponse:
     """
-    Receive Alertmanager firing alerts.
+    Receive Alertmanager firing alerts and publish each one to the
+    `prometheus.alerts` Redis Stream. The Cluster Operator Agent consumes
+    from that stream, maps the alert to a SOC 2 control, and runs the
+    full remediation loop (RAG → LLM → Store → Slack escalation).
 
-    Maps Prometheus alert labels to SOC 2 controls and publishes to the
-    `prometheus.alerts` Redis Stream (Week 4+).
+    Only `status=firing` alerts are forwarded; resolved alerts are acked
+    and silently dropped (no SOC 2 action needed once a resource recovers).
     """
     payload = await request.json()
     alerts = payload.get("alerts", [])
     log.info("Received %d Prometheus alert(s)", len(alerts))
-    # TODO (Week 4): forward to Redis Stream `prometheus.alerts`
+
+    published = 0
+    for alert in alerts:
+        if alert.get("status") != "firing":
+            continue
+        labels      = alert.get("labels", {})
+        annotations = alert.get("annotations", {})
+        await publish("prometheus.alerts", {
+            "source":      "prometheus",
+            "alertname":   labels.get("alertname", "UNKNOWN"),
+            "namespace":   labels.get("namespace", "default"),
+            "resource":    labels.get("pod") or labels.get("node") or labels.get("job", "unknown"),
+            "labels":      labels,
+            "summary":     annotations.get("summary", ""),
+            "description": annotations.get("description", annotations.get("summary", "")),
+            "starts_at":   alert.get("startsAt", ""),
+        })
+        published += 1
+
+    log.info("Published %d firing alert(s) to prometheus.alerts stream.", published)
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
-        content={"received": True, "alert_count": len(alerts)},
+        content={"received": True, "alert_count": len(alerts), "published": published},
     )
 
 
