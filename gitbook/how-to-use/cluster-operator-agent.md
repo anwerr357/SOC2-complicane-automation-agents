@@ -4,13 +4,13 @@ Watches live Kubernetes cluster state and Prometheus alerts for runtime violatio
 
 **Streams:** `k8s.events`, `prometheus.alerts` | **Controls:** CC7.1, CC7.2, A1.1, CC6.8
 
----
+***
 
 ## What makes it different
 
-Checkov scans static IaC files. This agent watches what is *actually running*. A direct `kubectl edit` on a production resource never touches a file in Git — this agent catches it.
+Checkov scans static IaC files. This agent watches what is _actually running_. A direct `kubectl edit` on a production resource never touches a file in Git — this agent catches it.
 
----
+***
 
 ## Example violation → escalation
 
@@ -23,7 +23,7 @@ An engineer runs `kubectl edit deployment/api` and adds a `hostPath` volume moun
 5. Slack alert sent to `#compliance-alerts` → human review required
 6. Evidence status set to `escalated`
 
----
+***
 
 ## Add a new Prometheus alert mapping
 
@@ -36,4 +36,3 @@ Open `agents/cluster_operator.py` and add a tuple to `_ALERT_CONTROL_MAP`:
 ),
 ```
 
-→ [Full developer reference](../../agents/cluster_operator.md)
