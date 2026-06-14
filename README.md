@@ -2,7 +2,6 @@
 
 📖 **Documentation:** [complyagents.gitbook.io/complyagentdoc](https://complyagents.gitbook.io/complyagentdoc/)
 
-[![CI](https://github.com/your-org/complianceAgents/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/complianceAgents/actions/workflows/ci.yml)
 
 [![GitBook](https://img.shields.io/badge/GitBook-Docs-blue)](https://complyagents.gitbook.io/complyagentdoc/)
 
