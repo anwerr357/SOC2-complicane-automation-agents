@@ -1,6 +1,6 @@
 # Table of contents
 
-* [gitbook](README.md)
+* [ComplyAgent](README.md)
   * [ComplyAgent](gitbook/summary.md)
   * [Configuration](gitbook/configuration.md)
   * [Installation](gitbook/installation.md)
