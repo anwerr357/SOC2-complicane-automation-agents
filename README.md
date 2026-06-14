@@ -3,6 +3,7 @@
 📖 **Documentation:** [complyagents.gitbook.io/complyagentdoc](https://complyagents.gitbook.io/complyagentdoc/)
 
 [![CI](https://github.com/your-org/complianceAgents/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/complianceAgents/actions/workflows/ci.yml)
+
 [![GitBook](https://img.shields.io/badge/GitBook-Docs-blue)](https://complyagents.gitbook.io/complyagentdoc/)
 
 An event-driven system of three autonomous AI agents that watch Kubernetes, Terraform, and GitHub 24/7 — detecting SOC 2 control violations in real time, explaining them in plain English, and automatically opening remediation pull requests.
