@@ -4,7 +4,7 @@ Scans every pull request for secrets and code-level compliance violations.
 
 **Stream:** `github.prs` | **Controls:** CC6.1, CC6.3, CC7.2, CC8.1
 
----
+***
 
 ## Trigger manually
 
@@ -21,14 +21,14 @@ curl -X POST http://localhost:8000/webhook/github \
   }'
 ```
 
----
+***
 
 ## Scanner chain
 
 1. **Trufflehog** — scans full git history of the PR branch for live secrets
 2. **Semgrep** — runs custom rules from `semgrep_rules/` for code patterns
 
----
+***
 
 ## Example violation → remediation
 
@@ -39,7 +39,7 @@ A new endpoint writes to the database without calling `audit_log()`:
 3. PR opened: `compliance-fix/CC7.2/semgrep-audit-log`
 4. Semgrep re-runs → passes → status `remediated`
 
----
+***
 
 ## Add a custom Semgrep rule
 
@@ -61,4 +61,4 @@ rules:
       control_name: "Authentication and MFA"
 ```
 
-→ [Full developer reference](../../agents/dev_team_agent.md)
+→ [Full developer reference](/broken/pages/Gplh51ArC2vhFXmyuDIc)
