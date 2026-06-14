@@ -1,44 +1,45 @@
 # ComplyAgent — Developer Documentation
 
-> **Week 1 implementation.** Four modules are fully built and tested.
-> Subsequent weeks add the remaining stubs. Jump straight to a module:
-> [checkov_runner](checkov_runner.md) · [evidence_store](evidence_store.md) · [webhooks](webhooks.md)
+> Three autonomous agents. One remediation loop. Full SOC 2 audit trail.
+> Jump to a module: [checkov_runner](checkov_runner.md) · [evidence_store](evidence_store.md) · [webhooks](webhooks.md) · [agents](agents/) · [remediation loop](remediation_loop.md)
 
 ---
 
-## End-to-end data flow (Week 1)
+## Full system data flow
 
 ```
-  Engineer / CI                  FastAPI                CheckovRunner         Postgres
-  ─────────────                  ───────                ─────────────         ────────
+  GitHub / CI / K8s             FastAPI                  Redis Streams
+  ─────────────────             ───────                  ─────────────
 
-  POST /scan/checkov
-  { file_path, git_sha }  ──►  scan_checkov()
-                                  │
-                                  │  await run_checkov(path, git_sha)
-                                  ├──────────────────────────────►
-                                  │                        asyncio.create_subprocess_exec(
-                                  │                          "checkov --file path
-                                  │                                   --output json
-                                  │                                   --quiet --compact"
-                                  │                        )
-                                  │                                │
-                                  │                        parse stdout JSON
-                                  │                        map check_id → control_id
-                                  │                        build CheckovFinding[]
-                                  │◄──────────────────────────────┤
-                                  │
-                                  │  async with get_session():
-                                  │    for finding in findings:
-                                  │      await log_event(session, finding.to_evidence_dict())
-                                  ├───────────────────────────────────────────►
-                                  │                                INSERT INTO
-                                  │                                evidence_events ...
-                                  │◄───────────────────────────────────────────
-                                  │
-  HTTP 200                        │
-  [{ check_id, control_id, ... }] │
-  ◄───────────────────────────────┘
+  POST /webhook/github  ──►  receive_github_webhook()
+  POST /scan/checkov    ──►  scan_checkov()
+  K8s watch event       ──►  (k8s_watcher publishes)  ──►  k8s.events
+                                                       ──►  tf.plans
+                                                       ──►  github.prs
+                                                             │
+                                          ┌──────────────────┤
+                                          │                  │
+                                    Policy Agent      Dev Team Agent
+                                    Checkov scan      Trufflehog + Semgrep
+                                          │                  │
+                                   Cluster Operator          │
+                                   k8s drift detect          │
+                                          │                  │
+                                          └──────┬───────────┘
+                                                 ▼
+                                        run_remediation_loop()
+                                        ┌─────────────────────┐
+                                        │ 1. NOTIFY  (Postgres)│
+                                        │ 2. LEARN   (Qdrant)  │
+                                        │ 3. RECOMMEND (Claude)│
+                                        │ 4. MUTATE  (GitHub)  │
+                                        │ 5. VALIDATE (re-scan)│
+                                        └──────────┬──────────┘
+                                                   │
+                                        ┌──────────┴──────────┐
+                                        │                     │
+                                   GitHub PR             Slack alert
+                                   (compliance-fix/*)    (on FAIL)
 ```
 
 ---
@@ -48,37 +49,36 @@
 | File | Responsibility | Public surface |
 |------|---------------|----------------|
 | [scanners/checkov_runner.py](checkov_runner.md) | Async Checkov subprocess wrapper; maps check IDs → SOC 2 controls | `CheckovRunner`, `CheckovFinding`, `run_checkov()`, `SOC2_CONTROL_MAP` |
-| [store/models.py](evidence_store.md#models) | SQLAlchemy ORM — `evidence_events` table + enumerations | `EvidenceEvent`, `AgentName`, `ScannerUsed`, `Severity`, `EventStatus` |
-| [store/evidence.py](evidence_store.md#evidence) | Async DB helper layer; all reads and writes go through here | `init_db()`, `close_db()`, `get_session()`, `log_event()`, `update_remediation()`, `escalate_event()`, `get_open_events()`, `get_recent_events()`, `get_events_by_control()` |
-| [api/webhooks.py](webhooks.md) | FastAPI app — webhook receivers, scan trigger, evidence read API | `POST /scan/checkov`, `GET /evidence`, `POST /webhook/github`, `/healthz`, `/readyz` |
+| [store/models.py](evidence_store.md#models) | SQLAlchemy ORM — `evidence_events` table | `EvidenceEvent`, `AgentName`, `ScannerUsed`, `Severity`, `EventStatus` |
+| [store/evidence.py](evidence_store.md#evidence) | Async DB helper layer | `init_db()`, `log_event()`, `update_remediation()`, `escalate_event()`, `get_open_events()`, `get_recent_events()` |
+| [api/webhooks.py](webhooks.md) | FastAPI app — webhook receivers, scan trigger, evidence read API | `POST /scan/checkov`, `GET /evidence`, `POST /webhook/github`, `/healthz` |
+| [agents/policy_agent.py](agents/policy_agent.md) | Terraform + K8s governance via Checkov | `PolicyAgent` |
+| [agents/cluster_operator.py](agents/cluster_operator.md) | Live K8s + Prometheus drift detection | `ClusterOperatorAgent` |
+| [agents/dev_team_agent.py](agents/dev_team_agent.md) | PR scanning via Trufflehog + Semgrep | `DevTeamAgent` |
+| [agents/remediation.py](remediation_loop.md) | Shared 5-step remediation loop | `run_remediation_loop()`, `LoopOutcome` |
+| `brain/llm.py` | Claude API client — structured explanation output | `generate_explanation()` |
+| `brain/rag.py` | Qdrant retrieval — SOC 2 control text by control ID | `retrieve_by_control_id()` |
+| `mutate/mutate.py` | GitHub branch + commit + PR creation | `open_remediation_pr()` |
+| `mutate/validate.py` | Post-remediation re-scan | `validate_remediation()` |
+| `notify/slack.py` | Slack escalation notifications | `post_escalation()`, `post_remediation()` |
 
 ---
 
 ## Cross-cutting conventions
 
 ### Async throughout
-Every function that touches I/O is `async`.  The Checkov subprocess uses
-`asyncio.create_subprocess_exec` so it never blocks the event loop.
-The DB layer uses SQLAlchemy 2.0 asyncio mode with `asyncpg` as the driver.
+Every function touching I/O is `async`. Checkov uses `asyncio.create_subprocess_exec`. DB uses SQLAlchemy 2.0 asyncio mode with `asyncpg`.
 
 ### Structured finding shape
-`CheckovFinding.to_evidence_dict()` is the **one canonical contract** between
-the scanner and the store.  It returns exactly the keys that `log_event()`
-expects.  Adding a new scanner means implementing the same `to_evidence_dict()`
-method on a new dataclass — no changes needed to the store or API.
+`CheckovFinding.to_evidence_dict()` is the canonical contract between scanners and the store. Adding a new scanner means implementing an equivalent `to_evidence_dict()` — no changes to the store or API.
 
 ### Immutable audit trail
-`evidence_events` rows are never deleted.  `status` progresses forward
-(`open → remediated | escalated | false_positive`) but is never reset.
-Every raw scanner JSON blob is kept verbatim in the `raw_finding` JSONB column.
+`evidence_events` rows are never deleted. `status` progresses forward (`open → remediated | escalated | false_positive`) and is never reset. Raw scanner JSON is kept verbatim in `raw_finding` JSONB.
 
 ### Error handling philosophy
-- Scanner failures (non-zero exit code, bad JSON) return `[]` and log a
-  warning — they never crash the API.
-- DB failures bubble up as exceptions and roll back the transaction
-  automatically via `get_session()`.
-- Unknown Checkov check IDs are mapped to `CC0.0 / Unknown control` — new
-  Checkov rules never break the pipeline; they just need a follow-up mapping.
+- Scanner failures return `[]` and log a warning — never crash the API
+- DB failures bubble up and roll back automatically via `get_session()`
+- Unknown Checkov check IDs map to `CC0.0` — new rules never break the pipeline
 
 ---
 
@@ -86,8 +86,13 @@ Every raw scanner JSON blob is kept verbatim in the `raw_finding` JSONB column.
 
 | Variable | Used by | Default |
 |----------|---------|---------|
-| `DATABASE_URL` | `api/webhooks.py`, `store/evidence.py` | `postgresql+asyncpg://complyagent:complyagentsecret@localhost:5432/compliance` |
-| `GITHUB_WEBHOOK_SECRET` | `api/webhooks.py` | `""` (signature check skipped if unset) |
-| `ANTHROPIC_API_KEY` | `brain/llm.py` (Week 3) | — |
-| `REDIS_URL` | agents (Week 4) | `redis://localhost:6379` |
-| `QDRANT_URL` | `brain/rag.py` (Week 3) | `http://localhost:6333` |
+| `DATABASE_URL` | `store/evidence.py` | `postgresql+asyncpg://complyagent:complyagentsecret@localhost:5432/compliance` |
+| `REDIS_URL` | `agents/base_agent.py` | `redis://localhost:6379` |
+| `ANTHROPIC_API_KEY` | `brain/llm.py` | — |
+| `QDRANT_URL` | `brain/rag.py` | `http://localhost:6333` |
+| `GITHUB_TOKEN` | `mutate/mutate.py`, `agents/dev_team_agent.py` | — |
+| `GITHUB_REPO_OWNER` | `agents/policy_agent.py` | — |
+| `GITHUB_REPO_NAME` | `agents/policy_agent.py` | — |
+| `GITHUB_WEBHOOK_SECRET` | `api/webhooks.py` | `""` |
+| `SLACK_BOT_TOKEN` | `notify/slack.py` | — |
+| `SLACK_ALERT_CHANNEL` | `notify/slack.py` | `#compliance-alerts` |
