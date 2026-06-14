@@ -1,12 +1,5 @@
-"""
-scanners/semgrep_runner.py
-──────────────────────────
-Async subprocess wrapper around Semgrep. Mirrors the CheckovRunner contract.
+"""Async wrapper around Semgrep; SOC 2 mapping is read from each rule's YAML metadata."""
 
-SOC 2 control mapping is read from each rule's YAML metadata
-(extra.metadata.soc2_control / soc2_control_name / severity), so adding a
-rule requires no Python change.
-"""
 from __future__ import annotations
 
 import asyncio

@@ -15,8 +15,8 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_USER: soc2
-          POSTGRES_PASSWORD: soc2secret
+          POSTGRES_USER: complyagent
+          POSTGRES_PASSWORD: complyagentsecret
           POSTGRES_DB: compliance
         ports: ["5432:5432"]
         options: >-
@@ -51,7 +51,7 @@ jobs:
 
       - name: Run tests
         env:
-          DATABASE_URL: postgresql+asyncpg://soc2:soc2secret@localhost:5432/compliance
+          DATABASE_URL: postgresql+asyncpg://complyagent:complyagentsecret@localhost:5432/compliance
           REDIS_URL: redis://localhost:6379
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: pytest tests/ -v --tb=short

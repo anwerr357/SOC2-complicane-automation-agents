@@ -1,37 +1,4 @@
-"""
-store/redis_streams.py
-──────────────────────
-Redis Streams client — shared by all agents and event publishers.
-
-Three core operations
-─────────────────────
-publish(stream, event)
-    XADD — drop an event into a stream.
-    Called by: k8s_watcher, api/webhooks (GitHub events), CI triggers.
-
-consume(stream, group, consumer)
-    XREADGROUP async generator — yields (msg_id, event) tuples forever.
-    Called by: every agent's run() loop.
-
-ack(stream, group, msg_id)
-    XACK — mark an event as successfully processed.
-    Called by: agents after handle_event() completes without error.
-
-Session lifecycle
-─────────────────
-Call init_redis(url) once from the FastAPI lifespan.
-Call close_redis() on shutdown.
-All other functions use the module-level client automatically.
-
-Event envelope
-──────────────
-Every event published through this module gets two fields injected:
-    event_id  : UUID v4 (generated if not supplied)
-    timestamp : ISO 8601 UTC string
-
-Nested dicts/lists in the payload are JSON-serialised because Redis
-Streams only store flat string key-value pairs.
-"""
+"""Redis Streams client (publish/consume/ack) shared by all agents and event publishers."""
 
 from __future__ import annotations
 
@@ -46,16 +13,12 @@ import redis.asyncio as aioredis
 
 log = logging.getLogger(__name__)
 
-# ── Module-level client ────────────────────────────────────────────────────
 
 _redis: aioredis.Redis | None = None
 
 
 async def init_redis(redis_url: str) -> None:
-    """
-    Create the async Redis client.
-    Call once from the FastAPI lifespan before any publish/consume calls.
-    """
+    """Create the async Redis client."""
     global _redis
     _redis = aioredis.from_url(
         redis_url,
@@ -80,13 +43,9 @@ def _get_redis() -> aioredis.Redis:
     return _redis
 
 
-# ── Serialisation helpers ──────────────────────────────────────────────────
 
 def _serialise(event: dict) -> dict[str, str]:
-    """
-    Flatten a dict for Redis Streams storage.
-    Nested dicts/lists are JSON-encoded. All values become strings.
-    """
+    """Flatten a dict for Redis Streams storage."""
     flat: dict[str, str] = {}
     for key, value in event.items():
         if isinstance(value, (dict, list)):
@@ -97,10 +56,7 @@ def _serialise(event: dict) -> dict[str, str]:
 
 
 def _deserialise(fields: dict[str, str]) -> dict:
-    """
-    Reverse of _serialise — try to JSON-decode each value.
-    Values that are not valid JSON are returned as plain strings.
-    """
+    """Reverse of _serialise — try to JSON-decode each value."""
     event: dict = {}
     for key, value in fields.items():
         try:
@@ -110,19 +66,9 @@ def _deserialise(fields: dict[str, str]) -> dict:
     return event
 
 
-# ── Core operations ────────────────────────────────────────────────────────
 
 async def publish(stream: str, event: dict) -> str:
-    """
-    Publish an event to a Redis Stream.
-
-    Parameters
-    ──────────
-    stream : stream name, e.g. "k8s.events"
-    event  : dict — nested values are JSON-serialised automatically
-
-    Returns the Redis-assigned message ID (e.g. "1716979200000-0").
-    """
+    """Publish an event to a Redis Stream."""
     r = _get_redis()
 
     # Inject standard envelope fields if not present
@@ -136,12 +82,7 @@ async def publish(stream: str, event: dict) -> str:
 
 
 async def ensure_consumer_group(stream: str, group: str) -> None:
-    """
-    Create a consumer group if it doesn't already exist.
-
-    Uses MKSTREAM so the stream is created automatically if it is new.
-    Safe to call repeatedly — BUSYGROUP error (group exists) is silently ignored.
-    """
+    """Create a consumer group if it doesn't already exist."""
     r = _get_redis()
     try:
         # id="0" means the group starts from the beginning of the stream
@@ -163,26 +104,7 @@ async def consume(
     block_ms: int = 2000,
     batch:    int = 10,
 ) -> AsyncGenerator[tuple[str, dict], None]:
-    """
-    Async generator that yields (msg_id, event) tuples from a stream.
-
-    Runs forever — use inside an asyncio task.
-    Stops cleanly when the enclosing task is cancelled.
-
-    Parameters
-    ──────────
-    stream   : stream name, e.g. "k8s.events"
-    group    : consumer group name, e.g. "policy_agent"
-    consumer : unique consumer name within the group, e.g. "worker-1"
-    block_ms : how long to wait for new events if the stream is empty (ms)
-    batch    : max events to fetch per XREADGROUP call
-
-    Usage
-    ─────
-    async for msg_id, event in consume("k8s.events", "policy_agent", "w1"):
-        await handle(event)
-        await ack("k8s.events", "policy_agent", msg_id)
-    """
+    """Async generator that yields (msg_id, event) tuples from a stream."""
     await ensure_consumer_group(stream, group)
     r = _get_redis()
 
@@ -216,13 +138,7 @@ async def consume(
 
 
 async def ack(stream: str, group: str, msg_id: str) -> None:
-    """
-    Acknowledge a message — tell Redis this consumer processed it successfully.
-
-    Call this AFTER handle_event() completes without error.
-    If you don't call ack(), Redis will re-deliver the message when the
-    consumer restarts (crash-safe retry behaviour).
-    """
+    """Acknowledge a message — tell Redis this consumer processed it successfully."""
     r = _get_redis()
     await r.xack(stream, group, msg_id)
     log.debug("ACK %s on %s/%s", msg_id, stream, group)

@@ -1,33 +1,11 @@
-"""
-api/webhooks.py
-───────────────
-FastAPI application — the single entry point for all inbound events.
-
-Endpoints
-─────────
-GET  /healthz                — liveness probe for Docker / K8s
-GET  /readyz                 — readiness probe (DB + Redis connection check)
-POST /webhook/github         — GitHub webhook (push, pull_request events)
-POST /webhook/prometheus     — Alertmanager webhook
-POST /scan/checkov           — Manual trigger: scan a single IaC file
-GET  /evidence               — Recent evidence events (dashboard use)
-GET  /evidence/{control_id}  — Events filtered by SOC 2 control
-
-Startup / shutdown
-──────────────────
-The FastAPI `lifespan` context manager handles:
-  - Postgres connection pool initialisation (init_db)
-  - Redis connection (future: consumer group creation)
-
-All handler functions are async.  Blocking work (subprocess calls, DB
-writes) is awaited and never executed on the event-loop thread directly.
-"""
+"""FastAPI app: single entry point for GitHub/Prometheus webhooks, manual scans, and evidence queries."""
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import hmac
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -58,25 +36,43 @@ from agents.policy_agent import PolicyAgent
 from agents.cluster_operator import ClusterOperatorAgent
 from agents.dev_team_agent import DevTeamAgent
 
-# ── Logging ────────────────────────────────────────────────────────────────
 
+LOG_LEVEL: str = os.environ.get("LOG_LEVEL", "INFO").upper()
+
+# Shared chain so structlog and plain stdlib records (agents, scanners,
+# sqlalchemy) render through one handler — otherwise the agents' getLogger()
+# INFO lines are swallowed by the root logger's WARNING default.
+_shared_processors = [
+    structlog.processors.TimeStamper(fmt="iso"),
+    structlog.stdlib.add_log_level,
+]
 structlog.configure(
-    processors=[
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.stdlib.add_log_level,
-        structlog.dev.ConsoleRenderer(),
-    ],
+    processors=[*_shared_processors, structlog.stdlib.ProcessorFormatter.wrap_for_formatter],
     wrapper_class=structlog.stdlib.BoundLogger,
     logger_factory=structlog.stdlib.LoggerFactory(),
+    cache_logger_on_first_use=True,
 )
+_formatter = structlog.stdlib.ProcessorFormatter(
+    foreign_pre_chain=_shared_processors,
+    processors=[
+        structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+        structlog.dev.ConsoleRenderer(),
+    ],
+)
+_handler = logging.StreamHandler()
+_handler.setFormatter(_formatter)
+_root = logging.getLogger()
+_root.handlers = [_handler]
+_root.setLevel(LOG_LEVEL)
+logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+
 log = structlog.get_logger(__name__)
 
 
-# ── Configuration (from environment) ──────────────────────────────────────
 
 DATABASE_URL: str = os.environ.get(
     "DATABASE_URL",
-    "postgresql+asyncpg://soc2:soc2secret@localhost:5432/compliance",
+    "postgresql+asyncpg://complyagent:complyagentsecret@localhost:5432/compliance",
 )
 GITHUB_WEBHOOK_SECRET: str = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
 GITHUB_TOKEN: str          = os.environ.get("GITHUB_TOKEN", "")
@@ -86,14 +82,12 @@ QDRANT_URL: str            = os.environ.get("QDRANT_URL",  "http://localhost:633
 REDIS_URL: str             = os.environ.get("REDIS_URL",   "redis://localhost:6379")
 
 
-# ── Lifespan ───────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialise all infrastructure and start agents on startup."""
-    log.info("Starting SOC 2 Compliance Agent API…")
+    log.info("Starting ComplyAgent API…")
 
-    # ── Infrastructure ─────────────────────────────────────────────────────
     await init_db(DATABASE_URL)
     log.info("Postgres ready.")
 
@@ -103,7 +97,6 @@ async def lifespan(app: FastAPI):
     await embed_controls(QDRANT_URL)
     log.info("SOC 2 controls embedded into Qdrant.")
 
-    # ── Start agents as background tasks ───────────────────────────────────
     policy_task   = asyncio.create_task(PolicyAgent().run(),         name="policy-agent")
     cluster_task  = asyncio.create_task(ClusterOperatorAgent().run(), name="cluster-agent")
     dev_team_task = asyncio.create_task(DevTeamAgent().run(),         name="devteam-agent")
@@ -111,7 +104,6 @@ async def lifespan(app: FastAPI):
 
     yield   # ← app serves requests here
 
-    # ── Shutdown ───────────────────────────────────────────────────────────
     log.info("Shutting down — stopping agents…")
     policy_task.cancel()
     cluster_task.cancel()
@@ -120,7 +112,6 @@ async def lifespan(app: FastAPI):
     await close_db()
 
 
-# ── App ────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title="SOC 2 Compliance Agent",
@@ -141,7 +132,6 @@ app.add_middleware(
 )
 
 
-# ── Health endpoints ───────────────────────────────────────────────────────
 
 @app.get("/healthz", tags=["ops"])
 async def healthz() -> dict[str, str]:
@@ -164,13 +154,9 @@ async def readyz() -> dict[str, str]:
         )
 
 
-# ── GitHub webhook ─────────────────────────────────────────────────────────
 
 def _verify_github_signature(body: bytes, signature_header: str | None) -> None:
-    """
-    Validate the X-Hub-Signature-256 header from GitHub.
-    Raises HTTP 401 if the signature does not match or the secret is wrong.
-    """
+    """Validate the X-Hub-Signature-256 header from GitHub."""
     if not GITHUB_WEBHOOK_SECRET:
         log.warning("GITHUB_WEBHOOK_SECRET not set — skipping signature check")
         return
@@ -202,14 +188,7 @@ async def github_webhook(
     x_github_event: str | None = Header(default=None),
     x_hub_signature_256: str | None = Header(default=None),
 ) -> JSONResponse:
-    """
-    Receive GitHub push and pull_request events.
-
-    On `push`: the Dev Team Agent will be triggered to run Trufflehog +
-    Semgrep on the changed files (Week 2+).
-
-    On `pull_request` (opened/synchronize): same scanner pipeline.
-    """
+    """Receive GitHub push and pull_request events."""
     body = await request.body()
     _verify_github_signature(body, x_hub_signature_256)
 
@@ -241,19 +220,10 @@ async def github_webhook(
     )
 
 
-# ── Prometheus / Alertmanager webhook ─────────────────────────────────────
 
 @app.post("/webhook/prometheus", tags=["webhooks"])
 async def prometheus_webhook(request: Request) -> JSONResponse:
-    """
-    Receive Alertmanager firing alerts and publish each one to the
-    `prometheus.alerts` Redis Stream. The Cluster Operator Agent consumes
-    from that stream, maps the alert to a SOC 2 control, and runs the
-    full remediation loop (RAG → LLM → Store → Slack escalation).
-
-    Only `status=firing` alerts are forwarded; resolved alerts are acked
-    and silently dropped (no SOC 2 action needed once a resource recovers).
-    """
+    """Receive Alertmanager firing alerts and publish each to prometheus.alerts."""
     payload = await request.json()
     alerts = payload.get("alerts", [])
     log.info("Received %d Prometheus alert(s)", len(alerts))
@@ -283,7 +253,6 @@ async def prometheus_webhook(request: Request) -> JSONResponse:
     )
 
 
-# ── Manual scan trigger ────────────────────────────────────────────────────
 
 class ScanRequest(BaseModel):
     file_path: str = Field(
@@ -326,16 +295,7 @@ class FindingResponse(BaseModel):
     tags=["scanning"],
 )
 async def scan_checkov(req: ScanRequest) -> list[FindingResponse]:
-    """
-    Manually trigger a Checkov scan and log all violations to the evidence store.
-
-    This endpoint is used for:
-    - Development testing against demo Terraform files
-    - CI pipeline integration (Week 6)
-    - Ad-hoc scans triggered by engineers
-
-    Returns the list of violations found (may be empty if all checks pass).
-    """
+    """Manually trigger a Checkov scan and log all violations to the evidence store."""
     path = Path(req.file_path)
     if not path.exists():
         raise HTTPException(
@@ -360,12 +320,10 @@ async def scan_checkov(req: ScanRequest) -> list[FindingResponse]:
     async with get_session() as session:
         for finding in findings:
 
-            # ── Step A: RAG — fetch SOC 2 control text from Qdrant ────────
             control = await retrieve_by_control_id(
                 finding.control_id, QDRANT_URL
             )
 
-            # ── Step B: LLM — generate plain-English explanation ──────────
             explanation = await generate_explanation(
                 check_id=finding.check_id,
                 control_id=finding.control_id,
@@ -376,7 +334,6 @@ async def scan_checkov(req: ScanRequest) -> list[FindingResponse]:
                 severity=finding.severity,
             )
 
-            # ── Step C: persist to evidence store ─────────────────────────
             evidence_dict = finding.to_evidence_dict()
             evidence_dict["violation_description"] = (
                 f"{explanation.violation_summary}\n\n"
@@ -385,7 +342,6 @@ async def scan_checkov(req: ScanRequest) -> list[FindingResponse]:
             )
             event = await log_event(session, evidence_dict)
 
-            # ── Step D: open remediation PR if requested ───────────────────
             pr_url    = None
             pr_number = None
 
@@ -439,18 +395,10 @@ async def scan_checkov(req: ScanRequest) -> list[FindingResponse]:
     return responses
 
 
-# ── Mock event triggers (development only) ────────────────────────────────
 
 @app.post("/dev/mock-k8s-events", tags=["dev"])
 async def trigger_mock_k8s_events(count: int = 3) -> dict:
-    """
-    Publish mock Kubernetes drift events to the k8s.events Redis Stream.
-
-    The Policy Agent and Cluster Operator Agent will pick them up
-    immediately and run the remediation loop.
-
-    Only for development — remove or restrict in production.
-    """
+    """Publish mock Kubernetes drift events to the k8s.events Redis Stream."""
     from scanners.k8s_watcher import publish_mock_events
     msg_ids = await publish_mock_events(count=count, delay_seconds=0)
     return {
@@ -465,10 +413,7 @@ async def trigger_mock_tf_plan(
     file_path: str = "tests/fixtures/demo.tf",
     repo_file_path: str = "infra/main.tf",
 ) -> dict:
-    """
-    Publish a Terraform plan event to the tf.plans Redis Stream.
-    The Policy Agent will pick it up and run Checkov.
-    """
+    """Publish a Terraform plan event to the tf.plans Redis Stream."""
     msg_id = await publish("tf.plans", {
         "source":         "manual",
         "file_path":      file_path,
@@ -478,15 +423,10 @@ async def trigger_mock_tf_plan(
     return {"published": 1, "stream": "tf.plans", "msg_id": msg_id}
 
 
-# ── Evidence read API ──────────────────────────────────────────────────────
 
 @app.get("/evidence", tags=["evidence"])
 async def list_evidence(limit: int = 50) -> list[dict]:
-    """
-    Return the `limit` most recent evidence events.
-
-    Used by the React dashboard (Week 6).
-    """
+    """Return the `limit` most recent evidence events."""
     async with get_session() as session:
         events = await get_recent_events(session, limit=limit)
     return [

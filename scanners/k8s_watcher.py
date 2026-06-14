@@ -1,31 +1,4 @@
-"""
-scanners/k8s_watcher.py
-────────────────────────
-Mock Kubernetes event publisher — Week 4 (no real cluster needed).
-
-In production (Week 5+), this module would use the kubernetes-asyncio
-watch API to stream real resource change events from the cluster.
-
-For Week 4, it publishes realistic mock events to the `k8s.events`
-Redis Stream so the Policy Agent and Cluster Operator Agent can be
-developed and tested without a running cluster.
-
-Mock events simulate the most common SOC 2 violations found in
-Kubernetes workloads:
-
-    CC6.6  — container running as root / no securityContext
-    CC6.6  — container with hostPath volume mount
-    CC6.8  — privileged container (security boundary bypass)
-    A1.1   — deployment missing resource limits / liveness probe
-    CC8.1  — resource modified directly (bypassing GitOps)
-    CC7.2  — pod spec changed without audit trail
-
-Usage
-─────
-    from scanners.k8s_watcher import publish_mock_events
-    await publish_mock_events(count=5)     # publishes 5 random events
-    await publish_mock_events(count=None)  # publishes all 8 events
-"""
+"""Mock Kubernetes event publisher that emits realistic SOC 2 violation events to the k8s.events stream."""
 
 from __future__ import annotations
 
@@ -40,7 +13,6 @@ log = logging.getLogger(__name__)
 STREAM = "k8s.events"
 
 
-# ── Mock event templates ───────────────────────────────────────────────────
 # Each entry represents a realistic K8s drift scenario.
 # In production these would come from the kubernetes-asyncio watch API.
 
@@ -172,27 +144,13 @@ MOCK_EVENTS: list[dict] = [
 ]
 
 
-# ── Publisher ──────────────────────────────────────────────────────────────
 
 async def publish_mock_events(
     count: int | None = None,
     *,
     delay_seconds: float = 0.5,
 ) -> list[str]:
-    """
-    Publish mock K8s drift events to the `k8s.events` Redis Stream.
-
-    Parameters
-    ──────────
-    count         : number of events to publish.
-                    None = publish all 8 mock events.
-                    Any integer = pick that many at random.
-    delay_seconds : pause between events (simulates real-time drift).
-
-    Returns
-    ───────
-    List of Redis message IDs that were published.
-    """
+    """Publish mock K8s drift events to the `k8s.events` Redis Stream."""
     events = MOCK_EVENTS if count is None else random.sample(
         MOCK_EVENTS, min(count, len(MOCK_EVENTS))
     )

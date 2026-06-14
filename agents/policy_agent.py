@@ -1,15 +1,5 @@
-"""
-agents/policy_agent.py
-──────────────────────
-Policy Agent — governance watcher for Terraform and Kubernetes YAML.
+"""Policy Agent: governance watcher for Terraform and Kubernetes YAML feeding the shared remediation loop."""
 
-Subscribes to: k8s.events, tf.plans
-Owns controls: CC6.1, CC6.6, CC6.7, CC9.1
-
-Builds a finding dict per event and hands it to the shared
-run_remediation_loop(). Terraform findings carry a repo_file_path
-(auto-remediable → PR); K8s drift carries none (→ escalated for review).
-"""
 from __future__ import annotations
 
 import logging
@@ -37,7 +27,6 @@ class PolicyAgent(BaseAgent):
         elif stream == "k8s.events":
             await self._handle_k8s_event(event)
 
-    # ── Terraform plan handler ─────────────────────────────────────────────
 
     async def _handle_tf_plan(self, event: dict) -> None:
         file_path = event.get("file_path")
@@ -61,7 +50,6 @@ class PolicyAgent(BaseAgent):
             )
             log.info("[PolicyAgent] %s → %s", fd["check_id"], outcome.status)
 
-    # ── K8s event handler ──────────────────────────────────────────────────
 
     async def _handle_k8s_event(self, event: dict) -> None:
         control_id = event.get("control_id", "")

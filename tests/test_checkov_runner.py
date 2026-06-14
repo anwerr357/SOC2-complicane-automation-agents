@@ -1,14 +1,4 @@
-"""
-tests/test_checkov_runner.py
-─────────────────────────────
-Integration tests for the Checkov runner.
-
-These tests require `checkov` to be installed in the active Python environment.
-Run with: pytest tests/test_checkov_runner.py -v
-
-The demo.tf fixture is intentionally misconfigured so we can assert that
-specific violations are detected and correctly mapped to SOC 2 controls.
-"""
+"""tests/test_checkov_runner.py"""
 
 from __future__ import annotations
 
@@ -35,13 +25,7 @@ async def test_scan_returns_findings(runner: CheckovRunner):
 
 @pytest.mark.asyncio
 async def test_s3_encryption_violation(runner: CheckovRunner):
-    """
-    An S3 encryption violation must be detected and mapped to CC6.7.
-
-    Checkov uses different check IDs across versions (CKV_AWS_19 in older
-    versions, CKV2_AWS_6x in v3.x).  We test at the control level, not the
-    check-ID level, so the test stays green across Checkov upgrades.
-    """
+    """An S3 encryption violation must be detected and mapped to CC6.7."""
     findings = await runner.scan(DEMO_TF)
     cc67_findings = [f for f in findings if f.control_id == "CC6.7"]
     assert cc67_findings, (
@@ -58,13 +42,7 @@ async def test_s3_encryption_violation(runner: CheckovRunner):
 
 @pytest.mark.asyncio
 async def test_iam_wildcard_violation(runner: CheckovRunner):
-    """
-    IAM wildcard / overprivileged policy must be detected.
-
-    Maps to CC6.1 or CC6.6 depending on which specific check fires.
-    Checkov v3.x renamed several IAM checks — we assert on the control
-    category rather than a fixed check ID.
-    """
+    """IAM wildcard / overprivileged policy must be detected."""
     findings = await runner.scan(DEMO_TF)
     # IAM violations map to CC6.1 (logical access) or CC6.6 (least privilege)
     iam_controls = {"CC6.1", "CC6.6"}

@@ -1,17 +1,5 @@
-"""
-agents/dev_team_agent.py
-────────────────────────
-Dev Team Agent — watches GitHub pull requests and code pushes.
+"""Dev Team Agent: clones pushed repos, runs Trufflehog + Semgrep, feeds findings to the remediation loop."""
 
-Subscribes to: github.prs
-Controls: CC6.1, CC6.3, CC7.2, CC8.1
-
-Week 5: on each event the agent
-  1. logs a CC8.1 change-management event (unchanged from Week 4),
-  2. shallow-clones the repo at the pushed sha into a temp dir,
-  3. runs Trufflehog (secrets) and Semgrep (custom rules) over it,
-  4. feeds every finding through the shared run_remediation_loop().
-"""
 from __future__ import annotations
 
 import asyncio
@@ -42,15 +30,7 @@ async def _shallow_clone(
     *,
     depth: int = 1,
 ) -> str:
-    """Shallow-clone repo into dest using token auth. Returns dest.
-
-    Security: the token is NEVER placed on the command line (argv is readable
-    via `ps` / /proc/<pid>/cmdline) nor embedded in the clone URL (git would
-    persist that into the cloned repo's .git/config, leaving a live credential
-    in the very tree the scanners then walk). Instead it is supplied to git
-    through a short-lived, owner-only GIT_ASKPASS helper that reads the token
-    from the child process environment and is deleted immediately after.
-    """
+    """Shallow-clone repo into dest using token auth. Returns dest."""
     # URL carries only the non-secret username; the token is the "password"
     # provided by the askpass helper below.
     url = f"https://x-access-token@github.com/{repo_full_name}.git"
@@ -107,7 +87,6 @@ class DevTeamAgent(BaseAgent):
             event_type, repo, sha,
         )
 
-        # ── CC8.1 — log the push as a change-management event ──────────────
         control = await retrieve_by_control_id("CC8.1", QDRANT_URL)
         async with get_session() as session:
             await log_event(session, {
@@ -134,7 +113,6 @@ class DevTeamAgent(BaseAgent):
             log.warning("[DevTeamAgent] No GITHUB_TOKEN — skipping scan for %s.", repo)
             return
 
-        # ── Clone + scan + remediate ───────────────────────────────────────
         with tempfile.TemporaryDirectory(prefix="devteam-") as tmp:
             try:
                 await _shallow_clone(
@@ -158,6 +136,12 @@ class DevTeamAgent(BaseAgent):
 
             log.info("[DevTeamAgent] %d code findings for %s.", len(findings), repo)
             for finding in findings:
+                # Scanners report the path under the temp clone dir; the loop
+                # needs it repo-relative to fetch/patch the file on GitHub.
+                if finding.get("file_path"):
+                    rel = os.path.relpath(finding["file_path"], tmp)
+                    finding["repo_file_path"] = rel
+                    finding["file_path"] = rel
                 outcome = await run_remediation_loop(
                     finding,
                     repo_full_name=repo,

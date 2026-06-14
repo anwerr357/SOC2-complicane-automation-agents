@@ -1,14 +1,5 @@
-"""
-scanners/trufflehog_runner.py
-──────────────────────────────
-Async subprocess wrapper around the Trufflehog secret scanner.
+"""Async wrapper around the Trufflehog secret scanner; verified secrets map to CC6.1, unverified to CC6.2."""
 
-Mirrors the CheckovRunner contract: scan(path) -> list[TrufflehogFinding],
-each finding carries a normalised SOC 2 mapping and a to_evidence_dict().
-
-Trufflehog scans git history and emits one JSON object per line (JSONL).
-We map verified (live) secrets to CC6.1 / HIGH and unverified to CC6.2 / MEDIUM.
-"""
 from __future__ import annotations
 
 import asyncio

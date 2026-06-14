@@ -18,10 +18,7 @@ class _FakeSession:
 
 
 def _set_values(stmt) -> dict:
-    """Return the SET column->value mapping of an UPDATE statement.
-
-    SQLAlchemy wraps each SET value in a BindParameter, so unwrap `.value`.
-    """
+    """Return the SET column->value mapping of an UPDATE statement."""
     return {
         col.name: getattr(val, "value", val)
         for col, val in stmt._values.items()

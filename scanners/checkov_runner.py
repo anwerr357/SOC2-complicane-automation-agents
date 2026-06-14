@@ -1,31 +1,4 @@
-"""
-scanners/checkov_runner.py
-──────────────────────────
-Async subprocess wrapper around the Checkov IaC scanner.
-
-What this module does
-─────────────────────
-1. Accepts a file path (Terraform .tf or Kubernetes YAML) and an optional
-   git SHA for evidence attribution.
-2. Runs `checkov --file <path> --output json --quiet` as a subprocess,
-   capturing stdout (structured JSON) and stderr (progress/logs).
-3. Parses the JSON, normalises every failed check into a `CheckovFinding`
-   dataclass with a consistent shape.
-4. Maps Checkov check IDs to SOC 2 Trust Service Criteria using a curated
-   lookup table.
-5. Returns a list of `CheckovFinding` objects ready to be passed directly
-   to `store.evidence.log_event()`.
-
-Design choices
-──────────────
-• Subprocess, not the Python SDK — Checkov's Python API is internal and
-  changes frequently between minor versions.  The CLI is the stable surface.
-• --quiet suppresses the progress bar so only JSON appears on stdout.
-• asyncio.create_subprocess_exec is used throughout — the caller never
-  blocks the event loop.
-• Unknown check IDs are gracefully mapped to "CC0.0 / Unknown Control" so
-  the pipeline never crashes on a new Checkov rule.
-"""
+"""Async wrapper around the Checkov IaC scanner; normalises findings and maps check IDs to SOC 2 controls."""
 
 from __future__ import annotations
 
@@ -39,7 +12,6 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
-# ── SOC 2 control mapping ──────────────────────────────────────────────────
 # Maps Checkov check IDs → (SOC 2 control ID, human-readable control name)
 # Maintained here because Checkov does not natively tag its findings with
 # Trust Service Criteria.
@@ -48,7 +20,6 @@ log = logging.getLogger(__name__)
 # Extend this dict as you add infrastructure coverage.
 
 SOC2_CONTROL_MAP: dict[str, tuple[str, str]] = {
-    # ── CC6.1 — Logical and physical access controls ───────────────────────
     "CKV_AWS_42":  ("CC6.1", "Logical and physical access controls"),
     "CKV_AWS_40":  ("CC6.1", "Logical and physical access controls"),
     "CKV_AWS_1":   ("CC6.1", "Logical and physical access controls"),
@@ -57,14 +28,11 @@ SOC2_CONTROL_MAP: dict[str, tuple[str, str]] = {
     "CKV_K8S_36":  ("CC6.1", "Logical and physical access controls"),
     "CKV_K8S_155": ("CC6.1", "Logical and physical access controls"),
 
-    # ── CC6.2 — Authentication & MFA ──────────────────────────────────────
     "CKV_AWS_9":   ("CC6.2", "Authentication and multi-factor authentication"),
     "CKV_AWS_75":  ("CC6.2", "Authentication and multi-factor authentication"),
 
-    # ── CC6.3 — Access removal & offboarding ──────────────────────────────
     "CKV_AWS_77":  ("CC6.3", "Access removal and user lifecycle management"),
 
-    # ── CC6.6 — Least privilege & IAM hardening ───────────────────────────
     "CKV_AWS_274": ("CC6.6", "Least privilege and logical access restriction"),
     "CKV_AWS_355": ("CC6.6", "Least privilege and logical access restriction"),
     "CKV_AWS_289": ("CC6.6", "Least privilege and logical access restriction"),
@@ -73,7 +41,6 @@ SOC2_CONTROL_MAP: dict[str, tuple[str, str]] = {
     "CKV_K8S_30":  ("CC6.6", "Least privilege and logical access restriction"),
     "CKV_K8S_32":  ("CC6.6", "Least privilege and logical access restriction"),
 
-    # ── CC6.7 — Encryption at rest ────────────────────────────────────────
     "CKV_AWS_19":   ("CC6.7", "Encryption at rest"),   # S3 bucket encryption (legacy)
     "CKV_AWS_145":  ("CC6.7", "Encryption at rest"),   # S3 KMS encryption
     "CKV2_AWS_6":   ("CC6.7", "Encryption at rest"),   # S3 bucket-level encryption (v2)
@@ -89,12 +56,10 @@ SOC2_CONTROL_MAP: dict[str, tuple[str, str]] = {
     "CKV_GCP_62":   ("CC6.7", "Encryption at rest"),
     "CKV_AZURE_3":  ("CC6.7", "Encryption at rest"),
 
-    # ── CC6.8 — Unauthorized or malicious software ────────────────────────
     "CKV_K8S_37":  ("CC6.8", "Unauthorized or malicious software protection"),
     "CKV_K8S_38":  ("CC6.8", "Unauthorized or malicious software protection"),
     "CKV_K8S_74":  ("CC6.8", "Unauthorized or malicious software protection"),
 
-    # ── CC7.1 — System monitoring & alerting ─────────────────────────────
     "CKV_AWS_52":  ("CC7.1", "System monitoring and alerting"),
     "CKV_AWS_18":  ("CC7.1", "System monitoring and alerting"),   # S3 access logging
     "CKV_AWS_150": ("CC7.1", "System monitoring and alerting"),
@@ -102,7 +67,6 @@ SOC2_CONTROL_MAP: dict[str, tuple[str, str]] = {
     "CKV_GCP_26":  ("CC7.1", "System monitoring and alerting"),
     "CKV_K8S_21":  ("CC7.1", "System monitoring and alerting"),
 
-    # ── CC7.2 — Audit logging ─────────────────────────────────────────────
     "CKV_AWS_67":  ("CC7.2", "Audit logging and monitoring"),
     "CKV_AWS_36":  ("CC7.2", "Audit logging and monitoring"),   # CloudTrail log validation
     "CKV_AWS_35":  ("CC7.2", "Audit logging and monitoring"),   # CloudTrail encryption
@@ -110,15 +74,12 @@ SOC2_CONTROL_MAP: dict[str, tuple[str, str]] = {
     "CKV_GCP_27":  ("CC7.2", "Audit logging and monitoring"),
     "CKV_K8S_91":  ("CC7.2", "Audit logging and monitoring"),
 
-    # ── CC8.1 — Change management ─────────────────────────────────────────
     "CKV2_AWS_5":  ("CC8.1", "Change management and authorised changes"),
     "CKV2_GCP_6":  ("CC8.1", "Change management and authorised changes"),
 
-    # ── CC9.1 — Risk assessment ───────────────────────────────────────────
     "CKV_AWS_24":  ("CC9.1", "Risk assessment and mitigation"),
     "CKV_AWS_25":  ("CC9.1", "Risk assessment and mitigation"),
 
-    # ── A1.1 — Availability / redundancy ─────────────────────────────────
     "CKV_AWS_91":  ("A1.1", "Availability and redundancy"),
     "CKV_AWS_92":  ("A1.1", "Availability and redundancy"),
     "CKV_K8S_8":   ("A1.1", "Availability and redundancy"),   # liveness probe
@@ -138,16 +99,10 @@ SEVERITY_MAP: dict[str, str] = {
 }
 
 
-# ── Data model ─────────────────────────────────────────────────────────────
 
 @dataclass
 class CheckovFinding:
-    """
-    Normalised representation of a single Checkov failed check.
-
-    This is the shape that `store.evidence.log_event()` expects under the
-    `raw_finding` key (plus the top-level scalar fields).
-    """
+    """Normalised representation of a single Checkov failed check."""
 
     # Scanner-native fields
     check_id: str
@@ -183,19 +138,9 @@ class CheckovFinding:
         }
 
 
-# ── Runner ─────────────────────────────────────────────────────────────────
 
 class CheckovRunner:
-    """
-    Async wrapper around the `checkov` CLI.
-
-    Usage::
-
-        runner = CheckovRunner()
-        findings = await runner.scan("/path/to/main.tf", git_sha="abc123")
-        for f in findings:
-            print(f.check_id, f.control_id, f.resource_name)
-    """
+    """Async wrapper around the `checkov` CLI."""
 
     def __init__(self, checkov_binary: str = "checkov") -> None:
         self._bin = checkov_binary
@@ -218,25 +163,7 @@ class CheckovRunner:
         git_sha: str | None = None,
         timeout: int = 120,
     ) -> list[CheckovFinding]:
-        """
-        Run Checkov against a single file and return normalised findings.
-
-        Parameters
-        ──────────
-        file_path : path to a .tf or .yaml/.yml file
-        git_sha   : optional HEAD SHA for audit attribution
-        timeout   : subprocess timeout in seconds (default 120)
-
-        Returns
-        ───────
-        List of `CheckovFinding` for every *failed* check.
-        Passed checks are silently discarded — they are not violations.
-
-        Raises
-        ──────
-        RuntimeError   if the checkov binary is not found
-        asyncio.TimeoutError  if the scan exceeds `timeout` seconds
-        """
+        """Run Checkov against a single file and return normalised findings."""
         binary = await self._find_binary()
         file_path = str(Path(file_path).resolve())
 
@@ -289,7 +216,6 @@ class CheckovRunner:
 
         return self._parse_results(raw, file_path=file_path, git_sha=git_sha)
 
-    # ── Internal parsers ────────────────────────────────────────────────────
 
     def _parse_results(
         self,
@@ -298,15 +224,7 @@ class CheckovRunner:
         file_path: str,
         git_sha: str | None,
     ) -> list[CheckovFinding]:
-        """
-        Handle two Checkov output shapes:
-
-        Shape A — single check type
-            {"results": {"failed_checks": [...]}, "check_type": "terraform"}
-
-        Shape B — multiple check types (when scanning a mixed directory)
-            [{"results": ..., "check_type": "terraform"}, ...]
-        """
+        """Handle two Checkov output shapes:"""
         if isinstance(raw, list):
             findings: list[CheckovFinding] = []
             for block in raw:
@@ -393,7 +311,6 @@ class CheckovRunner:
             return None
 
 
-# ── Convenience function ───────────────────────────────────────────────────
 
 async def run_checkov(
     file_path: str | Path,
@@ -401,13 +318,6 @@ async def run_checkov(
     git_sha: str | None = None,
     timeout: int = 120,
 ) -> list[CheckovFinding]:
-    """
-    Module-level shorthand for one-off scans.
-
-    Example::
-
-        from scanners.checkov_runner import run_checkov
-        findings = await run_checkov("infra/main.tf", git_sha="deadbeef")
-    """
+    """Module-level shorthand for one-off scans."""
     runner = CheckovRunner()
     return await runner.scan(file_path, git_sha=git_sha, timeout=timeout)

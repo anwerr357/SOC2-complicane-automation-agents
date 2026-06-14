@@ -1,14 +1,5 @@
-"""
-notify/slack.py
-───────────────
-Slack delivery for escalated compliance findings.
+"""Best-effort Slack delivery for escalated findings; failures are logged and swallowed, never raised."""
 
-When run_remediation_loop escalates a finding (non-remediable, or post-patch
-scan still failing), it calls post_escalation() to drop a Block Kit message in
-the channel named by SLACK_ALERT_CHANNEL. Best-effort: a missing token, a Slack
-API error, or a network failure is logged and swallowed — it never raises and
-never changes the escalation that is already persisted.
-"""
 from __future__ import annotations
 
 import logging
@@ -83,10 +74,7 @@ async def post_escalation(
     event_id: str,
     detail: str,
 ) -> bool:
-    """Post a Block Kit escalation to Slack.
-
-    Best-effort: returns True on delivery, False on skip/failure. Never raises.
-    """
+    """Post a Block Kit escalation to Slack."""
     if not SLACK_BOT_TOKEN:
         log.debug("[slack] SLACK_BOT_TOKEN unset — skipping escalation notify")
         return False
@@ -111,6 +99,52 @@ async def post_escalation(
         "blocks": blocks,
     }
 
+    return await _post(payload, event_id, kind="escalation")
+
+
+async def post_remediation(
+    *,
+    check_id: str,
+    control_id: str,
+    control_name: str,
+    severity: str,
+    resource_name: str,
+    agent_name: str,
+    explanation: str,
+    event_id: str,
+    pr_url: str,
+) -> bool:
+    """Post a Block Kit auto-remediation notice (fix PR opened) to Slack."""
+    if not SLACK_BOT_TOKEN:
+        log.debug("[slack] SLACK_BOT_TOKEN unset — skipping remediation notify")
+        return False
+
+    body = (explanation or "")[:_MAX_BLOCK_CHARS]
+    blocks = [
+        {"type": "header", "text": {"type": "plain_text",
+            "text": f"✅ Auto-remediated — {control_id}"}},
+        {"type": "section", "fields": [
+            {"type": "mrkdwn", "text": f"*Severity:*\n{severity}"},
+            {"type": "mrkdwn", "text": f"*Resource:*\n{resource_name}"},
+            {"type": "mrkdwn", "text": f"*Check:*\n{check_id}"},
+            {"type": "mrkdwn", "text": f"*Agent:*\n{agent_name}"},
+            {"type": "mrkdwn", "text": f"*Control:*\n{control_id} — {control_name}"},
+        ]},
+        {"type": "section", "text": {"type": "mrkdwn", "text": body}},
+        {"type": "section", "text": {"type": "mrkdwn", "text": f"*Fix PR:* <{pr_url}|{pr_url}>"}},
+        {"type": "context", "elements": [
+            {"type": "mrkdwn", "text": f"event `{event_id}` · remediation PR opened"}]},
+    ]
+    payload = {
+        "channel": SLACK_ALERT_CHANNEL,
+        "text": f"✅ Auto-remediated {control_id} ({severity}) on {resource_name} — {pr_url}",
+        "blocks": blocks,
+    }
+    return await _post(payload, event_id, kind="remediation")
+
+
+async def _post(payload: dict, event_id: str, *, kind: str) -> bool:
+    """POST a message to Slack; best-effort — log and swallow any failure."""
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.post(
@@ -120,10 +154,10 @@ async def post_escalation(
             )
         data = resp.json()
         if data.get("ok") is True:
-            log.info("[slack] escalation posted for event %s", event_id)
+            log.info("[slack] %s posted for event %s", kind, event_id)
             return True
-        log.warning("[slack] post failed: %s", data.get("error"))
+        log.warning("[slack] %s post failed: %s", kind, data.get("error"))
         return False
     except Exception as exc:
-        log.warning("[slack] escalation notify failed: %s", exc)
+        log.warning("[slack] %s notify failed: %s", kind, exc)
         return False

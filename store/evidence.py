@@ -1,32 +1,9 @@
-"""
-store/evidence.py
-─────────────────
-Async helper layer that sits between the agents and Postgres.
-
-All writes go through `log_event`.  All reads used by the dashboard and
-the remediation loop go through the query helpers below.  We never issue
-raw SQL outside this module — everything uses SQLAlchemy 2.0 async style.
-
-Session lifecycle
-─────────────────
-`get_session` is an async generator that yields a bound `AsyncSession`.
-Use it as a dependency in FastAPI routes or as an async context manager
-inside agents:
-
-    async with get_session() as session:
-        await log_event(session, finding)
-
-Engine initialisation
-─────────────────────
-Call `init_db()` once at startup (inside the FastAPI lifespan handler).
-It creates all tables if they don't yet exist.  Alembic migrations are
-used for production schema changes; this is the fast-bootstrap path for
-development and CI.
-"""
+"""Async helper layer between agents and Postgres; all writes go through log_event."""
 
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import AsyncGenerator
@@ -49,20 +26,14 @@ _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
-# ── Initialisation ─────────────────────────────────────────────────────────
 
 async def init_db(database_url: str) -> None:
-    """
-    Create the async engine, run CREATE TABLE IF NOT EXISTS for every model,
-    and store the session factory for later use.
-
-    Call once from your FastAPI lifespan or main agent entrypoint.
-    """
+    """Create the async engine, run CREATE TABLE IF NOT EXISTS for every model,"""
     global _engine, _session_factory
 
     _engine = create_async_engine(
         database_url,
-        echo=True,          # set True to see every SQL statement
+        echo=os.environ.get("SQL_ECHO", "false").lower() in ("1", "true", "yes"),
         pool_size=10,
         max_overflow=20,
         pool_pre_ping=True,  # drop stale connections automatically
@@ -102,22 +73,9 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
             raise
 
 
-# ── Write operations ───────────────────────────────────────────────────────
 
 async def log_event(session: AsyncSession, finding: dict) -> EvidenceEvent:
-    """
-    Persist a scanner finding as a new EvidenceEvent row.
-
-    Parameters
-    ──────────
-    session  : active AsyncSession (caller owns the transaction)
-    finding  : dict with keys matching EvidenceEvent columns.
-               Required keys: agent_name, scanner_used, check_id,
-               control_id, control_name, resource_name, file_path, severity,
-               raw_finding.
-
-    Returns the newly created (and flushed) ORM object.
-    """
+    """Persist a scanner finding as a new EvidenceEvent row."""
     event = EvidenceEvent(
         agent_name=finding["agent_name"],
         scanner_used=finding["scanner_used"],
@@ -154,11 +112,7 @@ async def update_remediation(
     status: EventStatus = EventStatus.REMEDIATED,
     violation_description: str | None = None,
 ) -> None:
-    """
-    Attach a pull-request URL to an existing event and flip its status.
-    Called by the mutate layer after a PR is opened. When
-    violation_description is given, the stored description is updated too.
-    """
+    """Attach a pull-request URL to an existing event and flip its status."""
     values = {"pr_url": pr_url, "pr_number": pr_number, "status": status}
     if violation_description is not None:
         values["violation_description"] = violation_description
@@ -202,7 +156,6 @@ async def increment_remediation_run(
     )
 
 
-# ── Read operations ────────────────────────────────────────────────────────
 
 async def get_open_events(session: AsyncSession) -> list[EvidenceEvent]:
     """Return all events that still need remediation."""

@@ -1,28 +1,5 @@
-"""
-agents/cluster_operator.py
-──────────────────────────
-Cluster Operator Agent — watches live Kubernetes cluster state for runtime drift.
+"""Cluster Operator Agent: watches live K8s/Prometheus drift; findings are escalated for human review."""
 
-Subscribes to: k8s.events, prometheus.alerts
-Owns controls: CC7.1, CC7.2, A1.1, CC6.8
-
-Builds a finding dict per event and hands it to the shared
-run_remediation_loop(). Runtime drift has no repo file to patch, so all
-findings are escalated for human review via Slack.
-
-Prometheus alert → SOC 2 control mapping
-─────────────────────────────────────────
-Alert name contains          Control
-───────────────────────────  ──────────────────────────────────────────
-CrashLoop / NodeNotReady /   A1.1  — Availability and redundancy
-  HighMemory / DiskFull /
-  PodOOMKilled
-Unauthorized / Suspicious /  CC6.8 — Unauthorized or malicious software
-  Malware / Exploit
-AuditLog / Logging /         CC7.2 — Audit logging and monitoring
-  EventLog
-(everything else)            CC7.1 — System monitoring and alerting
-"""
 from __future__ import annotations
 
 import logging
@@ -81,7 +58,6 @@ class ClusterOperatorAgent(BaseAgent):
         else:
             await self._handle_k8s(event)
 
-    # ── Kubernetes drift ───────────────────────────────────────────────────
 
     async def _handle_k8s(self, event: dict) -> None:
         control_id = event.get("control_id", "")
@@ -118,7 +94,6 @@ class ClusterOperatorAgent(BaseAgent):
         outcome = await run_remediation_loop(fd, repo_full_name="", github_token="")
         log.info("[ClusterOperator] %s/%s → %s", control_id, fd["check_id"], outcome.status)
 
-    # ── Prometheus alerts ──────────────────────────────────────────────────
 
     async def _handle_prometheus(self, event: dict) -> None:
         alertname  = event.get("alertname", "PROM_UNKNOWN")

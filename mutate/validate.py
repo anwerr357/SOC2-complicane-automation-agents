@@ -1,19 +1,5 @@
-"""
-mutate/validate.py
-──────────────────
-Post-remediation validator — the "V" in the 5-step loop.
+"""Post-remediation validator (step 5): re-scan patched content to confirm the original check no longer fires."""
 
-After a PR is opened, re-run the relevant scanner on the patched file:
-  - If the original check no longer fires → the loop logs REMEDIATED
-  - If the check still fails → the loop escalates for human review
-
-Dispatches on finding["scanner_used"]:
-  - checkov / semgrep : write patched_content to a temp file and re-scan it,
-    returning True when the original check_id is gone from the results.
-  - trufflehog        : a single-file re-scan can't redo git-history analysis,
-    so we confirm the raw secret string is absent from patched_content. This
-    is the practical "is the secret gone?" test.
-"""
 from __future__ import annotations
 
 import logging
@@ -32,14 +18,7 @@ def _ext_for(finding: dict, scanner: str) -> str:
 
 
 async def validate_remediation(finding: dict, patched_content: str) -> bool:
-    """
-    Re-verify that the violation described by `finding` is gone from
-    `patched_content`. Dispatches on finding["scanner_used"].
-
-    Returns True if the original check no longer fires, else False.
-    Never raises — any failure is treated as "not validated" (False) so the
-    caller escalates rather than falsely claiming success.
-    """
+    """Re-verify that the violation described by `finding` is gone after patching."""
     scanner = (finding.get("scanner_used") or "").lower()
     check_id = finding.get("check_id", "")
 

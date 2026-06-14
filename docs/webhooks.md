@@ -39,7 +39,7 @@ Read from environment variables at module load time:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATABASE_URL` | `postgresql+asyncpg://soc2:soc2secret@localhost:5432/compliance` | Asyncpg connection string passed to `init_db()` |
+| `DATABASE_URL` | `postgresql+asyncpg://complyagent:complyagentsecret@localhost:5432/compliance` | Asyncpg connection string passed to `init_db()` |
 | `GITHUB_WEBHOOK_SECRET` | `""` | HMAC secret shared with GitHub.  If empty, signature verification is skipped with a warning (for local dev). |
 
 ---

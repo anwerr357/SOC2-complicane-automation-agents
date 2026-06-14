@@ -1,33 +1,4 @@
-"""
-mutate/mutate.py
-────────────────
-Remediation mutator — step 4 of the 5-step compliance loop.
-
-Week 3 upgrade
-──────────────
-Step 2 now tries LLM-based patching first (brain/llm.generate_patch).
-If the LLM call fails or no API key is configured, falls back to the
-rule-based PATCH_REGISTRY functions from Week 2.  Interface is unchanged.
-
-What open_remediation_pr() does
-────────────────────────────────
-1. Fetch the violating file content from GitHub (current HEAD)
-2. Patch the file:
-     a. Try LLM  → generate_patch(file, finding, control_text)
-     b. Fallback → PATCH_REGISTRY[check_id](content, resource_name)
-3. Create branch:  compliance-fix/<control_id>/<check_id>
-4. Push the patched file as a single commit
-5. Open a PR:
-     title:  [CC6.7] Fix: S3 encryption missing on aws_s3_bucket.app_data
-     body:   LLM-generated explanation + changes summary + SOC 2 reference
-     label:  compliance-fix  (created if it doesn't exist)
-6. Return the PR URL so the caller can store it in the evidence table
-
-GitOps principle
-────────────────
-Fixes NEVER apply directly to the repo default branch.
-Every remediation goes through a pull request — humans stay in the loop.
-"""
+"""Remediation mutator (step 4): open a GitHub PR fixing a finding (LLM patch first, rule-based fallback)."""
 
 from __future__ import annotations
 
@@ -44,13 +15,11 @@ from brain.llm import generate_patch
 log = logging.getLogger(__name__)
 
 
-# ── PR label ──────────────────────────────────────────────────────────────
 
 COMPLIANCE_LABEL = "compliance-fix"
 LABEL_COLOR      = "d73a4a"   # red — high-visibility in the PR list
 
 
-# ── Rule-based patches ────────────────────────────────────────────────────
 # Each function receives the full file content as a string and returns the
 # patched content.  They use regex substitution so they work on any resource
 # name without hardcoding.
@@ -58,10 +27,7 @@ LABEL_COLOR      = "d73a4a"   # red — high-visibility in the PR list
 # Week 3: replace these with a single LLM call that understands context.
 
 def _patch_s3_encryption(content: str, resource_name: str) -> str:
-    """
-    Add aws_s3_bucket_server_side_encryption_configuration block.
-    Fixes: CKV_AWS_19, CKV2_AWS_6, CKV2_AWS_60, CKV2_AWS_61, CKV2_AWS_62
-    """
+    """Add aws_s3_bucket_server_side_encryption_configuration block."""
     # Extract bare resource label (e.g. "aws_s3_bucket.app_data" → "app_data")
     label = resource_name.split(".")[-1] if "." in resource_name else resource_name
 
@@ -81,10 +47,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "{label}_sse" {{
 
 
 def _patch_s3_logging(content: str, resource_name: str) -> str:
-    """
-    Add aws_s3_bucket_logging resource.
-    Fixes: CKV_AWS_18
-    """
+    """Add aws_s3_bucket_logging resource."""
     label = resource_name.split(".")[-1] if "." in resource_name else resource_name
 
     patch = f'''
@@ -99,10 +62,7 @@ resource "aws_s3_bucket_logging" "{label}_logging" {{
 
 
 def _patch_kms_rotation(content: str, resource_name: str) -> str:
-    """
-    Enable key rotation on aws_kms_key.
-    Fixes: CKV_AWS_7
-    """
+    """Enable key rotation on aws_kms_key."""
     # Find the kms key block and add enable_key_rotation = true
     pattern = r'(resource\s+"aws_kms_key"\s+"[^"]+"\s*\{)'
     replacement = r'\1\n  enable_key_rotation = true'
@@ -114,10 +74,7 @@ def _patch_kms_rotation(content: str, resource_name: str) -> str:
 
 
 def _patch_dynamodb_encryption(content: str, resource_name: str) -> str:
-    """
-    Add server_side_encryption block to aws_dynamodb_table.
-    Fixes: CKV_AWS_119
-    """
+    """Add server_side_encryption block to aws_dynamodb_table."""
     pattern = r'(resource\s+"aws_dynamodb_table"\s+"[^"]+"\s*\{)'
     replacement = (
         r'\1\n'
@@ -132,10 +89,7 @@ def _patch_dynamodb_encryption(content: str, resource_name: str) -> str:
 
 
 def _patch_iam_wildcard(content: str, resource_name: str) -> str:
-    """
-    Replace wildcard Action/Resource with least-privilege placeholders.
-    Fixes: CKV_AWS_40, CKV_AWS_274, CKV_AWS_289, CKV_AWS_290, CKV_AWS_355
-    """
+    """Replace wildcard Action/Resource with least-privilege placeholders."""
     # Replace "Action": "*" with a restricted placeholder
     patched = re.sub(
         r'"Action"\s*:\s*"\*"',
@@ -172,19 +126,13 @@ PATCH_REGISTRY: dict[str, callable] = {
 }
 
 
-# ── Rule-based patch helper ────────────────────────────────────────────────
 
 def _apply_rule_patch(
     content: str,
     check_id: str,
     resource_name: str,
 ) -> tuple[str, bool, str]:
-    """
-    Apply a hardcoded patch from PATCH_REGISTRY.
-
-    Returns (patched_content, patched_flag, changes_summary).
-    Used as fallback when the LLM patch is unavailable or fails.
-    """
+    """Apply a hardcoded patch from PATCH_REGISTRY."""
     patch_fn = PATCH_REGISTRY.get(check_id)
     if patch_fn is None:
         log.warning(
@@ -199,7 +147,6 @@ def _apply_rule_patch(
     return patched, True, summary
 
 
-# ── Result dataclass ───────────────────────────────────────────────────────
 
 @dataclass
 class RemediationResult:
@@ -211,7 +158,6 @@ class RemediationResult:
     patched_content: str = ""   # full patched file content, for the validate step
 
 
-# ── Main function ──────────────────────────────────────────────────────────
 
 async def open_remediation_pr(
     *,
@@ -226,34 +172,10 @@ async def open_remediation_pr(
     violation_description: str = "",
     control_text: str = "",       # SOC 2 control text from Qdrant — used by LLM patcher
 ) -> RemediationResult:
-    """
-    Open a GitHub pull request that fixes a single Checkov violation.
-
-    Parameters
-    ──────────
-    github_token      : Personal access token with repo scope
-    repo_full_name    : "owner/repo"
-    file_path         : path to the file inside the repo
-    check_id          : Checkov check that failed
-    control_id        : SOC 2 control the check maps to
-    control_name      : human-readable control label
-    resource_name     : the resource that violated (e.g. aws_s3_bucket.app_data)
-    severity          : HIGH | MEDIUM | LOW | INFO
-    violation_description : plain-English description (empty until Week 3 LLM)
-
-    Returns
-    ───────
-    RemediationResult with pr_url, pr_number, branch name, patched flag.
-
-    Raises
-    ──────
-    GithubException  if the GitHub API call fails
-    ValueError       if the file cannot be fetched from the repo
-    """
+    """Open a GitHub pull request that fixes a single Checkov violation."""
     g = Github(auth=Auth.Token(github_token))
     repo: Repository = g.get_repo(repo_full_name)
 
-    # ── 1. Fetch current file content ──────────────────────────────────────
     log.info("Fetching %s from %s", file_path, repo_full_name)
     try:
         file_obj  = repo.get_contents(file_path)
@@ -264,7 +186,6 @@ async def open_remediation_pr(
             f"Could not fetch {file_path} from {repo_full_name}: {exc}"
         ) from exc
 
-    # ── 2. Apply patch ─────────────────────────────────────────────────────
     # Try LLM first (Week 3). Fall back to PATCH_REGISTRY (Week 2) if:
     #   - no control_text was passed (RAG not available)
     #   - LLM call failed (bad key, timeout, etc.)
@@ -297,13 +218,12 @@ async def open_remediation_pr(
             original, check_id, resource_name
         )
 
-    # ── 3. Create branch ───────────────────────────────────────────────────
-    # Branch name: compliance-fix/CC6.7/CKV2_AWS_61
-    safe_control = control_id.replace(".", "-")
-    branch_name  = f"compliance-fix/{safe_control}/{check_id}"
-
+    # Unique branch per offending commit so re-runs don't collide:
+    # compliance-fix/CC6-7/CKV2_AWS_61-a1b2c3d
+    safe_control   = control_id.replace(".", "-")
     default_branch = repo.get_branch(repo.default_branch)
     base_sha       = default_branch.commit.sha
+    branch_name    = f"compliance-fix/{safe_control}/{check_id}-{base_sha[:7]}"
 
     try:
         repo.create_git_ref(
@@ -318,7 +238,6 @@ async def open_remediation_pr(
         else:
             raise
 
-    # ── 4. Push patched file ───────────────────────────────────────────────
     commit_message = (
         f"fix({control_id}): remediate {check_id} on {resource_name}\n\n"
         f"Automated compliance fix by SOC 2 Compliance Agent.\n"
@@ -336,10 +255,8 @@ async def open_remediation_pr(
     )
     log.info("Pushed patched file to branch %s", branch_name)
 
-    # ── 5. Ensure compliance-fix label exists ──────────────────────────────
     _ensure_label(repo)
 
-    # ── 6. Open pull request ───────────────────────────────────────────────
     pr_title = f"[{control_id}] Fix: {_short_description(check_id, resource_name)}"
     pr_body  = _build_pr_body(
         check_id=check_id,
@@ -380,7 +297,6 @@ async def open_remediation_pr(
     )
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────
 
 def _ensure_label(repo: Repository) -> None:
     """Create the compliance-fix label if it doesn't exist yet."""

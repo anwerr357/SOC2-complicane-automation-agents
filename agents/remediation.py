@@ -1,18 +1,5 @@
-"""
-agents/remediation.py
-─────────────────────
-The shared 5-step remediation loop, written once and reused by every agent.
+"""Shared 5-step remediation loop (notify, learn, recommend, mutate, validate) reused by every agent."""
 
-    1 NOTIFY    log the violation to the evidence store (status=OPEN)
-    2 LEARN     fetch the SOC 2 control text from Qdrant (RAG)
-    3 RECOMMEND ask Claude for a plain-English explanation
-    4 MUTATE    open a remediation PR on GitHub
-    5 VALIDATE  re-scan the patched content; mark REMEDIATED or ESCALATED
-
-All external calls reuse existing modules. Each call is imported at module
-scope so tests can monkeypatch them. The whole loop is wrapped so one bad
-finding never crashes the calling agent.
-"""
 from __future__ import annotations
 
 import logging
@@ -23,7 +10,7 @@ from brain.llm import generate_explanation
 from brain.rag import retrieve_by_control_id
 from mutate.mutate import open_remediation_pr
 from mutate.validate import validate_remediation
-from notify.slack import post_escalation
+from notify.slack import post_escalation, post_remediation
 from store.evidence import (
     escalate_event,
     get_session,
@@ -138,6 +125,17 @@ async def run_remediation_loop(
                     violation_description=enriched,
                 )
                 await session.commit()
+                await post_remediation(
+                    check_id=check_id,
+                    control_id=control_id,
+                    control_name=finding.get("control_name", control.control_name),
+                    severity=finding.get("severity", "MEDIUM"),
+                    resource_name=finding.get("resource_name", "unknown"),
+                    agent_name=finding.get("agent_name", "unknown"),
+                    explanation=enriched,
+                    event_id=str(event_id),
+                    pr_url=pr.pr_url,
+                )
                 log.info("[loop] %s REMEDIATED → %s", check_id, pr.pr_url)
                 return LoopOutcome(status="REMEDIATED", pr_url=pr.pr_url)
             else:

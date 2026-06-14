@@ -1,4 +1,4 @@
-# SOC 2 Compliance Agent — Developer Documentation
+# ComplyAgent — Developer Documentation
 
 > **Week 1 implementation.** Four modules are fully built and tested.
 > Subsequent weeks add the remaining stubs. Jump straight to a module:
@@ -86,7 +86,7 @@ Every raw scanner JSON blob is kept verbatim in the `raw_finding` JSONB column.
 
 | Variable | Used by | Default |
 |----------|---------|---------|
-| `DATABASE_URL` | `api/webhooks.py`, `store/evidence.py` | `postgresql+asyncpg://soc2:soc2secret@localhost:5432/compliance` |
+| `DATABASE_URL` | `api/webhooks.py`, `store/evidence.py` | `postgresql+asyncpg://complyagent:complyagentsecret@localhost:5432/compliance` |
 | `GITHUB_WEBHOOK_SECRET` | `api/webhooks.py` | `""` (signature check skipped if unset) |
 | `ANTHROPIC_API_KEY` | `brain/llm.py` (Week 3) | — |
 | `REDIS_URL` | agents (Week 4) | `redis://localhost:6379` |

@@ -1,4 +1,4 @@
-# SOC 2 Compliance Automation Agent
+# ComplyAgent — Continuous SOC 2 Compliance
 
 An event-driven system of three autonomous AI agents that watch Kubernetes,
 Terraform, and GitHub 24/7 — detecting SOC 2 control violations in real time,
@@ -256,7 +256,7 @@ pytest tests/ -v
 ## Project structure
 
 ```
-soc2-compliance-agent/
+complyagent/
 ├── agents/
 │   ├── policy_agent.py        — Terraform + K8s governance (Checkov)
 │   ├── cluster_operator.py    — Live K8s drift detection

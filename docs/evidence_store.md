@@ -194,7 +194,7 @@ Must be called **once at startup**, before any other function in this module.
 
 | Parameter | Description |
 |-----------|-------------|
-| `database_url` | Full asyncpg connection URL, e.g. `postgresql+asyncpg://soc2:secret@localhost:5432/compliance` |
+| `database_url` | Full asyncpg connection URL, e.g. `postgresql+asyncpg://complyagent:secret@localhost:5432/compliance` |
 
 Connection pool settings:
 
@@ -371,7 +371,7 @@ Powers the main `GET /evidence` endpoint and the dashboard event feed.
 from scanners.checkov_runner import run_checkov
 from store.evidence import init_db, get_session, log_event
 
-await init_db("postgresql+asyncpg://soc2:secret@localhost:5432/compliance")
+await init_db("postgresql+asyncpg://complyagent:secret@localhost:5432/compliance")
 
 findings = await run_checkov("infra/main.tf", git_sha="abc123")
 

@@ -1,18 +1,4 @@
-"""
-brain/embeddings.py
-───────────────────
-Embeds SOC 2 Trust Service Criteria into Qdrant at startup.
-
-Responsibilities
-────────────────
-1. Define the 11 SOC 2 control texts (canonical AICPA descriptions)
-2. Embed each text using fastembed (BAAI/bge-small-en-v1.5, 384-dim, local)
-3. Upsert all vectors into the Qdrant "soc2_controls" collection
-4. Skip gracefully if the collection is already populated (idempotent)
-
-Called once from the FastAPI lifespan on startup — takes ~1s after the
-model is cached locally (~22MB download on first run only).
-"""
+"""Embeds the SOC 2 control texts into Qdrant at startup (idempotent)."""
 
 from __future__ import annotations
 
@@ -29,14 +15,12 @@ from qdrant_client.models import (
 
 log = logging.getLogger(__name__)
 
-# ── Constants ──────────────────────────────────────────────────────────────
 
 COLLECTION_NAME = "soc2_controls"
 EMBEDDING_MODEL  = "BAAI/bge-small-en-v1.5"
 VECTOR_SIZE      = 384   # output dimension of bge-small-en-v1.5
 
 
-# ── SOC 2 control definitions ─────────────────────────────────────────────
 # Source: AICPA Trust Services Criteria 2017.
 # Each entry is (numeric_id, control_id, control_name, full_text).
 # numeric_id is used as the Qdrant point ID (must be integer or UUID).
@@ -195,7 +179,6 @@ SOC2_CONTROLS: list[ControlEntry] = [
 ]
 
 
-# ── Module-level embedding model (loaded once, reused) ────────────────────
 # fastembed caches the model weights after the first download.
 
 _embedding_model: TextEmbedding | None = None
@@ -210,22 +193,11 @@ def _get_model() -> TextEmbedding:
     return _embedding_model
 
 
-# ── Public API ─────────────────────────────────────────────────────────────
 
 async def embed_controls(qdrant_url: str) -> None:
-    """
-    Embed all SOC 2 controls and upsert them into Qdrant.
-
-    Idempotent: if the collection already has 11 points, skips the upsert.
-    Call once from the FastAPI lifespan handler after init_db().
-
-    Parameters
-    ──────────
-    qdrant_url : Qdrant REST URL, e.g. "http://localhost:6333"
-    """
+    """Embed all SOC 2 controls and upsert them into Qdrant."""
     client = QdrantClient(url=qdrant_url)
 
-    # ── Create collection if it doesn't exist ─────────────────────────────
     existing = [c.name for c in client.get_collections().collections]
 
     if COLLECTION_NAME not in existing:
@@ -247,12 +219,10 @@ async def embed_controls(qdrant_url: str) -> None:
             )
             return
 
-    # ── Embed all control texts ───────────────────────────────────────────
     model  = _get_model()
     texts  = [c.text for c in SOC2_CONTROLS]
     vectors = list(model.embed(texts))   # returns list of numpy arrays
 
-    # ── Build Qdrant points ───────────────────────────────────────────────
     points = [
         PointStruct(
             id=control.id,
@@ -266,7 +236,6 @@ async def embed_controls(qdrant_url: str) -> None:
         for i, control in enumerate(SOC2_CONTROLS)
     ]
 
-    # ── Upsert into Qdrant ────────────────────────────────────────────────
     client.upsert(collection_name=COLLECTION_NAME, points=points)
 
     log.info(

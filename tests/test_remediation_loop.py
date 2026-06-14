@@ -178,12 +178,7 @@ async def test_non_remediable_finding_escalates(patched_io, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_shallow_clone_helper(tmp_path, monkeypatch):
-    """_shallow_clone clones into a temp dir without leaking the token.
-
-    The token must NOT appear in argv (ps-readable) nor in the clone URL
-    (git would persist it to .git/config). It is supplied via a GIT_ASKPASS
-    helper, reading the token from the child env.
-    """
+    """_shallow_clone clones into a temp dir without leaking the token."""
     from agents.dev_team_agent import _shallow_clone
 
     captured = {}
