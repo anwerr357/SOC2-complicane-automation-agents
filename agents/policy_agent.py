@@ -7,7 +7,7 @@ import os
 
 from agents.base_agent import BaseAgent
 from agents.remediation import run_remediation_loop
-from scanners.checkov_runner import run_checkov
+from scanners.sandboxed_runner import SandboxedScanRunner
 
 log = logging.getLogger(__name__)
 
@@ -27,29 +27,37 @@ class PolicyAgent(BaseAgent):
         elif stream == "k8s.events":
             await self._handle_k8s_event(event)
 
-
     async def _handle_tf_plan(self, event: dict) -> None:
-        file_path = event.get("file_path")
-        if not file_path:
-            log.warning("[PolicyAgent] tf.plans event missing file_path — skipping.")
+        repo_file_path = event.get("repo_file_path") or event.get("file_path")
+        if not repo_file_path:
+            log.warning("[PolicyAgent] tf.plans event missing repo_file_path — skipping.")
             return
 
-        findings = await run_checkov(file_path, git_sha=event.get("git_sha"))
-        owned = [f for f in findings if f.control_id in self.CONTROLS]
+        repo_url = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}"
+        try:
+            result = await SandboxedScanRunner().scan_file(
+                repo_url,
+                repo_file_path,
+                git_sha=event.get("git_sha"),
+            )
+        except Exception as exc:
+            log.error("[PolicyAgent] sandboxed scan_file failed: %s", exc)
+            return
+
+        owned = [f for f in result.checkov if f.control_id in self.CONTROLS]
         log.info(
             "[PolicyAgent] tf.plans: %d findings, %d owned.",
-            len(findings), len(owned),
+            len(result.checkov), len(owned),
         )
 
         repo_full_name = f"{GITHUB_OWNER}/{GITHUB_REPO}"
         for finding in owned:
             fd = finding.to_evidence_dict()
-            fd["repo_file_path"] = event.get("repo_file_path")
+            fd["repo_file_path"] = repo_file_path
             outcome = await run_remediation_loop(
                 fd, repo_full_name=repo_full_name, github_token=GITHUB_TOKEN,
             )
             log.info("[PolicyAgent] %s → %s", fd["check_id"], outcome.status)
-
 
     async def _handle_k8s_event(self, event: dict) -> None:
         control_id = event.get("control_id", "")
@@ -78,7 +86,6 @@ class PolicyAgent(BaseAgent):
                 "violation": event.get("violation", ""),
             },
         }
-        # K8s drift has no repo file to patch → loop escalates for human review.
         outcome = await run_remediation_loop(
             fd, repo_full_name="", github_token="",
         )
