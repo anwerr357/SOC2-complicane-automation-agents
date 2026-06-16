@@ -1,75 +1,19 @@
-"""Dev Team Agent: clones pushed repos, runs Trufflehog + Semgrep, feeds findings to the remediation loop."""
+"""Dev Team Agent: scans pushed repos via Daytona sandboxed runner, feeds findings to the remediation loop."""
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
-import stat
-import tempfile
 
 from agents.base_agent import BaseAgent
 from agents.remediation import run_remediation_loop
 from brain.rag import retrieve_by_control_id
-from scanners.semgrep_runner import SemgrepRunner
-from scanners.trufflehog_runner import TrufflehogRunner
+from scanners.sandboxed_runner import SandboxedScanRunner
 from store.evidence import get_session, log_event
 
 log = logging.getLogger(__name__)
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://localhost:6333")
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-CLONE_DEPTH = int(os.environ.get("CLONE_DEPTH", "1"))
-
-
-async def _shallow_clone(
-    repo_full_name: str,
-    sha: str,
-    token: str,
-    dest: str,
-    *,
-    depth: int = 1,
-) -> str:
-    """Shallow-clone repo into dest using token auth. Returns dest."""
-    # URL carries only the non-secret username; the token is the "password"
-    # provided by the askpass helper below.
-    url = f"https://x-access-token@github.com/{repo_full_name}.git"
-
-    askpass = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".sh", prefix="gh-askpass-", delete=False
-    )
-    try:
-        # Helper echoes the token from the env — the secret is never written
-        # into the script file itself (avoids any interpolation/injection).
-        askpass.write('#!/bin/sh\nprintf "%s" "$GH_TOKEN"\n')
-        askpass.close()
-        os.chmod(askpass.name, stat.S_IRWXU)  # 0o700 — owner only
-
-        env = {
-            **os.environ,
-            "GIT_ASKPASS": askpass.name,
-            "GH_TOKEN": token,
-            "GIT_TERMINAL_PROMPT": "0",
-        }
-        cmd = ["git", "clone", "--depth", str(depth), url, dest]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
-        _, stderr_b = await proc.communicate()
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"git clone failed for {repo_full_name}: "
-                f"{stderr_b.decode(errors='replace')[:300]}"
-            )
-        return dest
-    finally:
-        try:
-            os.unlink(askpass.name)
-        except OSError:
-            pass
 
 
 class DevTeamAgent(BaseAgent):
@@ -78,6 +22,7 @@ class DevTeamAgent(BaseAgent):
     CONTROLS = ["CC6.1", "CC6.3", "CC7.2", "CC8.1"]
 
     async def handle_event(self, stream: str, event: dict) -> None:
+        github_token = os.environ.get("GITHUB_TOKEN", "")
         event_type = event.get("event_type", "unknown")
         repo = event.get("repo", "unknown")
         sha = event.get("sha", "")
@@ -109,45 +54,28 @@ class DevTeamAgent(BaseAgent):
             })
             await session.commit()
 
-        if not GITHUB_TOKEN:
+        if not github_token:
             log.warning("[DevTeamAgent] No GITHUB_TOKEN — skipping scan for %s.", repo)
             return
 
-        with tempfile.TemporaryDirectory(prefix="devteam-") as tmp:
-            try:
-                await _shallow_clone(
-                    repo, sha, GITHUB_TOKEN, tmp, depth=CLONE_DEPTH
-                )
-            except RuntimeError as exc:
-                log.error("[DevTeamAgent] clone failed: %s", exc)
-                return
+        repo_url = f"https://github.com/{repo}"
+        try:
+            result = await SandboxedScanRunner().scan(repo_url, git_sha=sha or None)
+        except Exception as exc:
+            log.error("[DevTeamAgent] sandboxed scan failed for %s: %s", repo, exc)
+            return
 
-            findings: list[dict] = []
-            try:
-                th = await TrufflehogRunner().scan(tmp, git_sha=sha)
-                findings += [f.to_evidence_dict() for f in th]
-            except Exception as exc:
-                log.error("[DevTeamAgent] trufflehog failed: %s", exc)
-            try:
-                sg = await SemgrepRunner().scan(tmp, git_sha=sha)
-                findings += [f.to_evidence_dict() for f in sg]
-            except Exception as exc:
-                log.error("[DevTeamAgent] semgrep failed: %s", exc)
+        findings = result.all_findings()
+        log.info("[DevTeamAgent] %d findings for %s.", len(findings), repo)
 
-            log.info("[DevTeamAgent] %d code findings for %s.", len(findings), repo)
-            for finding in findings:
-                # Scanners report the path under the temp clone dir; the loop
-                # needs it repo-relative to fetch/patch the file on GitHub.
-                if finding.get("file_path"):
-                    rel = os.path.relpath(finding["file_path"], tmp)
-                    finding["repo_file_path"] = rel
-                    finding["file_path"] = rel
-                outcome = await run_remediation_loop(
-                    finding,
-                    repo_full_name=repo,
-                    github_token=GITHUB_TOKEN,
-                )
-                log.info(
-                    "[DevTeamAgent] %s → %s",
-                    finding.get("check_id"), outcome.status,
-                )
+        for finding in findings:
+            finding.setdefault("repo_file_path", finding.get("file_path"))
+            outcome = await run_remediation_loop(
+                finding,
+                repo_full_name=repo,
+                github_token=github_token,
+            )
+            log.info(
+                "[DevTeamAgent] %s → %s",
+                finding.get("check_id"), outcome.status,
+            )

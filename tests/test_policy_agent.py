@@ -1,7 +1,8 @@
-"""PolicyAgent adapter tests — run_remediation_loop and run_checkov monkeypatched."""
+"""PolicyAgent adapter tests — run_remediation_loop and SandboxedScanRunner monkeypatched."""
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -46,16 +47,24 @@ def captured_loop(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_tf_plan_owned_finding_gets_repo_file_path(captured_loop, monkeypatch):
-    async def fake_run_checkov(path, *, git_sha=None):
-        return [_FakeCheckovFinding("CC6.7"), _FakeCheckovFinding("CC8.8")]  # one owned, one not
-    monkeypatch.setattr(pa, "run_checkov", fake_run_checkov)
+    from scanners.sandboxed_runner import ScanResult
 
-    agent = pa.PolicyAgent()
-    await agent.handle_event("tf.plans", {
-        "file_path": "/tmp/scan/main.tf",
-        "repo_file_path": "infra/main.tf",
-        "git_sha": "abc123",
-    })
+    fake_scan_result = ScanResult(checkov=[_FakeCheckovFinding("CC6.7"), _FakeCheckovFinding("CC8.8")])
+
+    mock_runner_instance = AsyncMock()
+    mock_runner_instance.scan_file.return_value = fake_scan_result
+
+    with (
+        patch("agents.policy_agent.SandboxedScanRunner", return_value=mock_runner_instance),
+        patch("agents.policy_agent.GITHUB_OWNER", "myorg"),
+        patch("agents.policy_agent.GITHUB_REPO", "myrepo"),
+    ):
+        agent = pa.PolicyAgent()
+        await agent.handle_event("tf.plans", {
+            "file_path": "/tmp/scan/main.tf",
+            "repo_file_path": "infra/main.tf",
+            "git_sha": "abc123",
+        })
 
     assert len(captured_loop) == 1, "only the owned (CC6.7) finding should run the loop"
     assert captured_loop[0]["repo_file_path"] == "infra/main.tf"

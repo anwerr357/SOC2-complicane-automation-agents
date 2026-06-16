@@ -174,34 +174,3 @@ async def test_non_remediable_finding_escalates(patched_io, monkeypatch):
     assert patched_io["notified"] is not None
     assert patched_io["notified"]["detail"] == "not auto-remediable — human review"
     assert patched_io["notified"]["control_id"] == "CC6.1"
-
-
-@pytest.mark.asyncio
-async def test_shallow_clone_helper(tmp_path, monkeypatch):
-    """_shallow_clone clones into a temp dir without leaking the token."""
-    from agents.dev_team_agent import _shallow_clone
-
-    captured = {}
-
-    async def fake_exec(*args, **kwargs):
-        captured["args"] = args
-        captured["env"] = kwargs.get("env", {})
-
-        class _P:
-            returncode = 0
-            async def communicate(self):
-                return (b"", b"")
-        return _P()
-
-    secret = "ghp_SeCrEt123456"
-    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_exec)
-    dest = await _shallow_clone("owner/repo", "abc123", secret, str(tmp_path), depth=1)
-    assert dest == str(tmp_path)
-    assert "git" in captured["args"][0]
-    assert "--depth" in captured["args"]
-    # repo URL present, but WITHOUT the token embedded
-    assert any("github.com/owner/repo" in a for a in captured["args"])
-    assert not any(secret in a for a in captured["args"]), "token must not be in argv"
-    # token is delivered via the askpass env instead
-    assert captured["env"].get("GH_TOKEN") == secret
-    assert "GIT_ASKPASS" in captured["env"]
