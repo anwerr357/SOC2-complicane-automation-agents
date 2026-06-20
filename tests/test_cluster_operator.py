@@ -12,11 +12,12 @@ import agents.cluster_operator as co
 def captured_loop(monkeypatch):
     calls = []
 
-    async def fake_loop(finding, *, repo_full_name, github_token):
-        calls.append(finding)
-        return SimpleNamespace(status="ESCALATED", pr_url=None)
+    class _FakeWorkflow:
+        async def arun(self, finding, *, repo_full_name, github_token):
+            calls.append(finding)
+            return SimpleNamespace(status="ESCALATED", pr_url=None)
 
-    monkeypatch.setattr(co, "run_remediation_loop", fake_loop)
+    monkeypatch.setattr(co, "RemediationWorkflow", _FakeWorkflow)
     return calls
 
 

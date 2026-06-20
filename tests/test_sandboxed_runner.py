@@ -373,7 +373,7 @@ class TestDevTeamAgentUsesSandboxedRunner:
         }
         with (
             patch("agents.dev_team_agent.SandboxedScanRunner") as MockRunner,
-            patch("agents.dev_team_agent.run_remediation_loop", new_callable=AsyncMock) as mock_loop,
+            patch("agents.dev_team_agent.RemediationWorkflow") as mock_loop,
             patch("agents.dev_team_agent.log_event", new_callable=AsyncMock),
             patch("agents.dev_team_agent.get_session") as mock_session,
             patch("agents.dev_team_agent.retrieve_by_control_id", new_callable=AsyncMock),
@@ -387,7 +387,7 @@ class TestDevTeamAgentUsesSandboxedRunner:
             mock_ctx.__aexit__ = AsyncMock(return_value=False)
             mock_session.return_value = mock_ctx
 
-            mock_loop.return_value = MagicMock(status="REMEDIATED")
+            mock_loop.return_value.arun = AsyncMock(return_value=MagicMock(status="REMEDIATED"))
 
             import os
             with patch.dict(os.environ, {"GITHUB_TOKEN": "tok"}):
@@ -396,7 +396,7 @@ class TestDevTeamAgentUsesSandboxedRunner:
         mock_runner_instance.scan.assert_called_once_with(
             "https://github.com/org/myrepo", git_sha="deadbeef"
         )
-        assert mock_loop.call_count == 1
+        assert mock_loop.return_value.arun.call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -418,7 +418,7 @@ class TestPolicyAgentUsesSandboxedRunner:
         }
         with (
             patch("agents.policy_agent.SandboxedScanRunner") as MockRunner,
-            patch("agents.policy_agent.run_remediation_loop", new_callable=AsyncMock) as mock_loop,
+            patch("agents.policy_agent.RemediationWorkflow") as mock_loop,
             patch("agents.policy_agent.GITHUB_TOKEN", "tok"),
             patch("agents.policy_agent.GITHUB_OWNER", "myorg"),
             patch("agents.policy_agent.GITHUB_REPO", "myrepo"),
@@ -426,7 +426,7 @@ class TestPolicyAgentUsesSandboxedRunner:
             mock_runner_instance = AsyncMock()
             mock_runner_instance.scan_file.return_value = fake_result
             MockRunner.return_value = mock_runner_instance
-            mock_loop.return_value = MagicMock(status="REMEDIATED")
+            mock_loop.return_value.arun = AsyncMock(return_value=MagicMock(status="REMEDIATED"))
 
             await agent.handle_event("tf.plans", event)
 
@@ -435,7 +435,7 @@ class TestPolicyAgentUsesSandboxedRunner:
             "infra/main.tf",
             git_sha="deadbeef",
         )
-        assert mock_loop.call_count == 1
+        assert mock_loop.return_value.arun.call_count == 1
 
 
 # ---------------------------------------------------------------------------

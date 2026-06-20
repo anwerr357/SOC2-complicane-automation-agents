@@ -6,7 +6,7 @@ import logging
 import os
 
 from agents.base_agent import BaseAgent
-from agents.remediation import run_remediation_loop
+from agents.remediation import RemediationWorkflow
 from brain.rag import retrieve_by_control_id
 from scanners.sandboxed_runner import SandboxedScanRunner
 from store.evidence import get_session, log_event
@@ -70,7 +70,7 @@ class DevTeamAgent(BaseAgent):
 
         for finding in findings:
             finding.setdefault("repo_file_path", finding.get("file_path"))
-            outcome = await run_remediation_loop(
+            outcome = await RemediationWorkflow().arun(
                 finding,
                 repo_full_name=repo,
                 github_token=github_token,

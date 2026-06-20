@@ -6,7 +6,7 @@ import logging
 import os
 
 from agents.base_agent import BaseAgent
-from agents.remediation import run_remediation_loop
+from agents.remediation import RemediationWorkflow
 from scanners.sandboxed_runner import SandboxedScanRunner
 
 log = logging.getLogger(__name__)
@@ -54,7 +54,7 @@ class PolicyAgent(BaseAgent):
         for finding in owned:
             fd = finding.to_evidence_dict()
             fd["repo_file_path"] = repo_file_path
-            outcome = await run_remediation_loop(
+            outcome = await RemediationWorkflow().arun(
                 fd, repo_full_name=repo_full_name, github_token=GITHUB_TOKEN,
             )
             log.info("[PolicyAgent] %s → %s", fd["check_id"], outcome.status)
@@ -86,7 +86,7 @@ class PolicyAgent(BaseAgent):
                 "violation": event.get("violation", ""),
             },
         }
-        outcome = await run_remediation_loop(
+        outcome = await RemediationWorkflow().arun(
             fd, repo_full_name="", github_token="",
         )
         log.info("[PolicyAgent] k8s %s → %s", fd["check_id"], outcome.status)

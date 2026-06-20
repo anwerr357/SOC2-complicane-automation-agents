@@ -7,6 +7,7 @@ import os
 from dataclasses import dataclass
 
 from anthropic import AsyncAnthropic
+from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
 
@@ -24,8 +25,7 @@ def _get_client() -> AsyncAnthropic:
     return _client
 
 
-@dataclass
-class ExplanationResult:
+class ExplanationResult(BaseModel):
     violation_summary:  str
     business_impact:    str
     remediation_steps:  str
@@ -103,7 +103,7 @@ _PATCH_TOOL = {
 }
 
 
-def _build_system_prompt(control_text: str, control_id: str, control_name: str) -> str:
+def build_system_prompt(control_text: str, control_id: str, control_name: str) -> str:
     """Build the cached system prompt embedding the SOC 2 control text."""
     return (
         "You are a senior SOC 2 compliance engineer with deep expertise in "
@@ -136,7 +136,7 @@ async def generate_explanation(
     """Generate a plain-English explanation of a SOC 2 violation."""
     client = _get_client()
 
-    system_prompt = _build_system_prompt(control_text, control_id, control_name)
+    system_prompt = build_system_prompt(control_text, control_id, control_name)
 
     user_message = (
         f"Explain the following SOC 2 violation:\n\n"
@@ -212,7 +212,7 @@ async def generate_patch(
     """Generate a corrected version of the violating file via Claude."""
     client = _get_client()
 
-    system_prompt = _build_system_prompt(control_text, control_id, control_name)
+    system_prompt = build_system_prompt(control_text, control_id, control_name)
 
     user_message = (
         f"Fix the following SOC 2 violation in this Terraform file.\n\n"

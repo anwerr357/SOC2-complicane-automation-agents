@@ -47,6 +47,38 @@ services:
       timeout: 5s
       retries: 5
 
+  langfuse-db:
+    image: postgres:16-alpine
+    container_name: complyagent_langfuse_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfuse_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  langfuse:
+    image: langfuse/langfuse:3
+    container_name: complyagent_langfuse
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-db:5432/langfuse
+      NEXTAUTH_SECRET: changeme-replace-with-32-char-random-string
+      NEXTAUTH_URL: http://localhost:3000
+      SALT: changeme-replace-with-random-string
+      TELEMETRY_ENABLED: "false"
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+
   api:
     build:
       context: .
@@ -58,6 +90,9 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-complyagent}:${POSTGRES_PASSWORD:-complyagentsecret}@postgres:5432/${POSTGRES_DB:-compliance}
       REDIS_URL: redis://redis:6379
       QDRANT_URL: http://qdrant:6333
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_HOST: http://langfuse:3000
     ports:
       - "8000:8000"
     volumes:
@@ -80,3 +115,4 @@ volumes:
   postgres_data:
   redis_data:
   qdrant_data:
+  langfuse_pgdata:

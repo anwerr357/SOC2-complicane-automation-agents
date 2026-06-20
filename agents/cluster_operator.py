@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from agents.base_agent import BaseAgent
-from agents.remediation import run_remediation_loop
+from agents.remediation import RemediationWorkflow
 
 log = logging.getLogger(__name__)
 
@@ -91,7 +91,7 @@ class ClusterOperatorAgent(BaseAgent):
             "[ClusterOperator] k8s violation: %s on %s [%s]",
             fd["check_id"], fd["resource_name"], control_id,
         )
-        outcome = await run_remediation_loop(fd, repo_full_name="", github_token="")
+        outcome = await RemediationWorkflow().arun(fd, repo_full_name="", github_token="")
         log.info("[ClusterOperator] %s/%s → %s", control_id, fd["check_id"], outcome.status)
 
 
@@ -128,5 +128,5 @@ class ClusterOperatorAgent(BaseAgent):
             alertname, control_id, severity,
         )
         # No IaC file to patch — escalated to Slack for human review.
-        outcome = await run_remediation_loop(fd, repo_full_name="", github_token="")
+        outcome = await RemediationWorkflow().arun(fd, repo_full_name="", github_token="")
         log.info("[ClusterOperator] PROM_%s → %s", alertname, outcome.status)

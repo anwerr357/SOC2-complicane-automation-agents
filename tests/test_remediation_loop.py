@@ -1,4 +1,4 @@
-"""Unit tests for run_remediation_loop with all I/O monkeypatched."""
+"""Unit tests for RemediationWorkflow with all I/O monkeypatched."""
 from __future__ import annotations
 
 import pytest
@@ -16,6 +16,16 @@ class _FakeExplanation:
     violation_summary = "summary"
     business_impact = "impact"
     remediation_steps = "steps"
+
+
+class _FakeRunOutput:
+    """Minimal stand-in for agno RunOutput when response_model is set."""
+    content = _FakeExplanation()
+
+
+class _FakeRecommendAgent:
+    async def arun(self, message, **kwargs):
+        return _FakeRunOutput()
 
 
 class _FakePR:
@@ -79,25 +89,25 @@ def patched_io(monkeypatch):
     async def fake_retrieve(control_id, url):
         return _FakeControl()
 
-    async def fake_explain(**kw):
-        return _FakeExplanation()
+    def fake_build_recommend_agent(instructions):
+        return _FakeRecommendAgent()
 
     async def fake_open_pr(**kw):
         return _FakePR()
+
+    async def fake_post_escalation(**kw):
+        calls["notified"] = kw
+        return True
 
     monkeypatch.setattr(rem, "log_event", fake_log_event)
     monkeypatch.setattr(rem, "update_remediation", fake_update_remediation)
     monkeypatch.setattr(rem, "escalate_event", fake_escalate)
     monkeypatch.setattr(rem, "get_session", fake_get_session)
     monkeypatch.setattr(rem, "retrieve_by_control_id", fake_retrieve)
-    monkeypatch.setattr(rem, "generate_explanation", fake_explain)
+    monkeypatch.setattr(rem, "_build_recommend_agent", fake_build_recommend_agent)
     monkeypatch.setattr(rem, "open_remediation_pr", fake_open_pr)
-
-    async def fake_post_escalation(**kw):
-        calls["notified"] = kw
-        return True
-
     monkeypatch.setattr(rem, "post_escalation", fake_post_escalation)
+
     return calls
 
 
@@ -105,24 +115,30 @@ def patched_io(monkeypatch):
 async def test_validation_pass_marks_remediated(patched_io, monkeypatch):
     async def fake_validate(finding, patched_content):
         return True
-    monkeypatch.setattr(rem, "validate_remediation", fake_validate)
 
-    outcome = await rem.run_remediation_loop(
+    async def fake_post_remediation(**kw):
+        pass
+
+    monkeypatch.setattr(rem, "validate_remediation", fake_validate)
+    monkeypatch.setattr(rem, "post_remediation", fake_post_remediation)
+
+    outcome = await rem.RemediationWorkflow().arun(
         _base_finding(), repo_full_name="x/y", github_token="t"
     )
     assert outcome.status == "REMEDIATED"
     assert patched_io["remediated"] == ("evt-123", _FakePR.pr_url, 1)
     assert patched_io["escalated"] is None
-    assert patched_io["notified"] is None  # no Slack on REMEDIATED
+    assert patched_io["notified"] is None
 
 
 @pytest.mark.asyncio
 async def test_validation_fail_escalates(patched_io, monkeypatch):
     async def fake_validate(finding, patched_content):
         return False
+
     monkeypatch.setattr(rem, "validate_remediation", fake_validate)
 
-    outcome = await rem.run_remediation_loop(
+    outcome = await rem.RemediationWorkflow().arun(
         _base_finding(), repo_full_name="x/y", github_token="t"
     )
     assert outcome.status == "ESCALATED"
@@ -136,9 +152,14 @@ async def test_validation_fail_escalates(patched_io, monkeypatch):
 async def test_logs_violation_first(patched_io, monkeypatch):
     async def fake_validate(finding, patched_content):
         return True
-    monkeypatch.setattr(rem, "validate_remediation", fake_validate)
 
-    await rem.run_remediation_loop(
+    async def fake_post_remediation(**kw):
+        pass
+
+    monkeypatch.setattr(rem, "validate_remediation", fake_validate)
+    monkeypatch.setattr(rem, "post_remediation", fake_post_remediation)
+
+    await rem.RemediationWorkflow().arun(
         _base_finding(), repo_full_name="x/y", github_token="t"
     )
     assert patched_io["logged"]["check_id"] == "TRUFFLEHOG_AWS"
@@ -146,31 +167,31 @@ async def test_logs_violation_first(patched_io, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_non_remediable_finding_escalates(patched_io, monkeypatch):
-    """A finding with no patchable file / unsupported scanner is escalated
-    without attempting a PR."""
+    """A finding with an unsupported scanner is escalated without opening a PR."""
     pr_called = {"opened": False}
 
     async def fake_open_pr(**kw):
         pr_called["opened"] = True
         return _FakePR()
-    monkeypatch.setattr(rem, "open_remediation_pr", fake_open_pr)
 
     async def fake_validate(finding, patched_content):
         return True
+
+    monkeypatch.setattr(rem, "open_remediation_pr", fake_open_pr)
     monkeypatch.setattr(rem, "validate_remediation", fake_validate)
 
     finding = _base_finding()
-    finding["scanner_used"] = "k8s_watch"   # not a validate-supported scanner
+    finding["scanner_used"] = "k8s_watch"
     finding.pop("repo_file_path", None)
     finding["file_path"] = "k8s/default/web"
 
-    outcome = await rem.run_remediation_loop(
+    outcome = await rem.RemediationWorkflow().arun(
         finding, repo_full_name="", github_token=""
     )
     assert outcome.status == "ESCALATED"
     assert patched_io["escalated"] == "evt-123"
     assert patched_io["remediated"] is None
-    assert pr_called["opened"] is False, "must not open a PR for non-remediable findings"
+    assert pr_called["opened"] is False
     assert patched_io["notified"] is not None
     assert patched_io["notified"]["detail"] == "not auto-remediable — human review"
     assert patched_io["notified"]["control_id"] == "CC6.1"

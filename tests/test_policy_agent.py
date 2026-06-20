@@ -37,11 +37,12 @@ class _FakeCheckovFinding:
 def captured_loop(monkeypatch):
     calls = []
 
-    async def fake_loop(finding, *, repo_full_name, github_token):
-        calls.append(finding)
-        return SimpleNamespace(status="REMEDIATED", pr_url="http://x/pr/1")
+    class _FakeWorkflow:
+        async def arun(self, finding, *, repo_full_name, github_token):
+            calls.append(finding)
+            return SimpleNamespace(status="REMEDIATED", pr_url="http://x/pr/1")
 
-    monkeypatch.setattr(pa, "run_remediation_loop", fake_loop)
+    monkeypatch.setattr(pa, "RemediationWorkflow", _FakeWorkflow)
     return calls
 
 
