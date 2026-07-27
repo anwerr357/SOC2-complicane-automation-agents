@@ -1,6 +1,7 @@
 # ComplyAgent — Continuous SOC 2 Compliance
 
 📖 **Documentation:** [complyagents.gitbook.io/complyagentdoc](https://complyagents.gitbook.io/complyagentdoc/)
+**DEMO:** [demo](https://www.loom.com/share/db18e9db346f4d659ce9556bff85859b)
 
 
 [![GitBook](https://img.shields.io/badge/GitBook-Docs-blue)](https://complyagents.gitbook.io/complyagentdoc/)
